@@ -1112,14 +1112,26 @@ class MainWindow(
                 layer['rgb_overview_pixmap'] = QPixmap.fromImage(qimg.copy())
                 self.logger.info(f"[PRE-LOAD] RGB overview cached for {layer['name']}")
 
-                if hasattr(self, 'viewer') and self.viewer:
+                is_active_layer = (
+                    getattr(self, 'active_layer_id', None) == layer.get('id')
+                )
+                if is_active_layer and hasattr(self, 'viewer') and self.viewer:
                     self.viewer.set_color_normalization(True)
                     self.viewer.set_smart_rgb_overview(layer['rgb_overview_pixmap'])
                     self.viewer.async_tile_loader.clear_cache()
                     self.viewer._delayed_tile_load(immediate=True)
                     self.logger.info(f"[PRE-LOAD] RGB overview displayed immediately for {layer['name']}")
+                else:
+                    self.logger.debug(
+                        f"[PRE-LOAD] Cached overview for inactive layer without changing viewer: {layer['name']}"
+                    )
 
-            elif result.get('needs_color_normalization') and hasattr(self, 'viewer') and self.viewer:
+            elif (
+                result.get('needs_color_normalization')
+                and getattr(self, 'active_layer_id', None) == layer.get('id')
+                and hasattr(self, 'viewer')
+                and self.viewer
+            ):
                 self.viewer.set_color_normalization(True)
                 self.viewer.async_tile_loader.clear_cache()
                 self.viewer._delayed_tile_load(immediate=True)
@@ -1326,6 +1338,10 @@ class MainWindow(
 
                 else:
                     self.viewer.set_tile_manager(active_layer['loader'])
+
+                    cached_overview = active_layer.get('rgb_overview_pixmap')
+                    if cached_overview is not None:
+                        self.viewer.set_smart_rgb_overview(cached_overview)
 
                     self.viewer.enable_full_resolution(True)
 
