@@ -1,0 +1,30 @@
+butuh:
+-deepness di qgis
+-ui mengikuti software kanopai
+-masukin uav image kebun - deteksi otomatis - keluar bounding box
+-python -pyqt -SQLite (jika database diperlukan)
+-perlu menentukan AOI (user bisa masukkin exclude area) (opsional fitur)
+-Matching manual (opsional, jika band raster tidak sama dengan band stats dari dataset training)
+-raster input bigtiff (tiff besar)
+-requirement windows 10 (ram 8GB), aplikasi harus bisa dijalankan di device tersebut
+-user dapat memvalidasi hasil inference deteksi (jadi nanti ada 2 .shp deteksi dan setelah divalidasi pengguna)
+-dibuat installer .exe 
+-ada key nya (gak bisa diduplikasi dengan mudah)
+-installer nya ter-encrypt
+
+
+
+
+tidak butuh:
+-object storage
+
+
+tambahan
+-valdasi itu harusnya sistem koreksi
+-Ketika import model ke db input kegunaan/tujuan model
+-Ketika load tampilkan tujuan tersebut
+-menghasilkan file .shp yang dapat diekspor dan di proses di software luar
+-kebutuhan non-fungsional ditambahkan sqlite
+
+objective:
+- menghasilkan .shp yang dapat overlay ke qgis

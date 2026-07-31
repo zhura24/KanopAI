@@ -1,0 +1,83 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts (nuitka)
+build/nuitka/dist/
+build/nuitka/main.build/
+build/nuitka/*.xml
+build/nuitka/*.zip
+/build/_validation_dist/
+/build/_validation_work/
+/dist/
+/installer/
+/build/KanopiAI/
+
+# Geospatial data files (user data)
+*.geojson
+*.tif
+*.tiff
+*.tif.aux.xml
+*.img
+*.cpg
+*.dbf
+*.prj
+*.shp
+*.shx
+
+# Large dataset files
+*.zip
+*.tar.gz
+*.onnx
+*.pt
+
+# Generated inference/export data
+/output/
+/export_*/
+
+# Logs
+logs/
+*.log
+
+# Data directories (large user data)
+/Data Baru
+/Raster Image
+/Model Kanopi
+/project
+/multispectral/
+
+# Legacy Claude artifacts
+.claude/
+*.md
+
+# Misc
+*.png
+.txt
+.bat
+*.bak
+*_fixed.py
+/requirements.txt
+/requirementss.txt
+/build/requirements_build.txt
+/hypothesis
