@@ -74,11 +74,19 @@ class InferencePanel(CollapsibleBox):
         app_db_dir = app_dir / "data"
         app_db_path = app_db_dir / "kanopai_models.db"
         legacy_db_path = Path.home() / ".kanopai" / "kanopai_models.db"
+        bundled_db_path = (
+            Path(getattr(sys, "_MEIPASS", app_dir))
+            / "data"
+            / "kanopai_models.db"
+        )
 
         try:
             app_db_dir.mkdir(parents=True, exist_ok=True)
-            if not app_db_path.exists() and legacy_db_path.exists():
-                shutil.copy2(legacy_db_path, app_db_path)
+            if not app_db_path.exists():
+                if bundled_db_path.exists():
+                    shutil.copy2(bundled_db_path, app_db_path)
+                elif legacy_db_path.exists():
+                    shutil.copy2(legacy_db_path, app_db_path)
             return app_db_path
         except OSError as error:
             self.logger.warning(
