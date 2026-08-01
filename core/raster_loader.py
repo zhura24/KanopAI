@@ -36,7 +36,7 @@ class RasterLoader(QObject):
             with PerformanceLogger(self.logger, f"Load file: {Path(file_path).name}"):
                 if self.dataset:
                     self.logger.debug("Closing previous dataset")
-                    self.dataset.close()
+                    self.close()
 
                 self.dataset = rasterio.open(file_path)
                 self.file_path = file_path
@@ -59,10 +59,9 @@ class RasterLoader(QObject):
                     f"Type: {self.metadata['dtype']}"
                 )
 
-                # Build external .ovr overview file jika belum ada — persis seperti QGIS.
-                # Ini dijalankan sekali; kali berikutnya file yang sama dibuka, .ovr sudah
-                # ada di disk dan GDAL langsung pakai tanpa perlu rebuild.
-                self._ensure_overviews()
+                # Overview construction is intentionally deferred to the
+                # background preview worker so opening a large raster never
+                # blocks the GUI thread.
 
                 return True
 
@@ -78,7 +77,8 @@ class RasterLoader(QObject):
             return False
 
     def read_window(self, x_offset: int, y_offset: int, width: int, height: int,
-                   scale: float = 1.0, band_indexes: Optional[List[int]] = None) -> Optional[NDArray]:
+                   scale: float = 1.0, band_indexes: Optional[List[int]] = None,
+                   overview_level: int = 0) -> Optional[NDArray]:
         """Read a window from the raster dataset (thread-safe).
 
         Args:
@@ -108,9 +108,16 @@ class RasterLoader(QObject):
 
                 window = Window(x_offset, y_offset, width, height)
 
+                if overview_level > 0:
+                    decimation = self.get_overview_decimations()[overview_level - 1]
+                    # The tile still occupies its native raster footprint in
+                    # the scene, so the overview read must be expanded back
+                    # to that footprint by the viewer.
+                    scale = 1.0 / decimation
+
                 out_shape = (
-                    int(height * scale),
-                    int(width * scale)
+                    max(1, int(height * scale)),
+                    max(1, int(width * scale))
                 )
 
                 band_count = len(band_indexes) if band_indexes else self.dataset.count
@@ -129,6 +136,35 @@ class RasterLoader(QObject):
                 self.logger.error(error_msg, exc_info=True)
                 self.error_occurred.emit(error_msg)
                 return None
+
+    def get_overview_decimations(self) -> List[int]:
+        """Return available overview factors, including the base level separately."""
+        if not self.dataset:
+            return []
+        try:
+            return list(self.dataset.overviews(1))
+        except Exception as e:
+            self.logger.debug(f"Unable to read overview metadata: {e}")
+            return []
+
+    def select_overview_level(self, zoom_factor: float) -> int:
+        """Select the closest pyramid level for pixels-per-screen-pixel."""
+        overviews = self.get_overview_decimations()
+        if not overviews or zoom_factor >= 1.0:
+            return 0
+
+        requested_decimation = 1.0 / max(zoom_factor, 1e-6)
+        candidates = [(0, 1)] + list(enumerate(overviews, start=1))
+        return min(candidates, key=lambda item: abs(item[1] - requested_decimation))[0]
+
+    def get_overview_decimation(self, overview_level: int) -> int:
+        """Return the source-to-overview scale factor for a selected level."""
+        if overview_level <= 0:
+            return 1
+        overviews = self.get_overview_decimations()
+        if overview_level > len(overviews):
+            return 1
+        return int(overviews[overview_level - 1])
 
     def read_full_downsampled(self, max_dimension: int = 2048) -> Optional[NDArray]:
         if not self.dataset:
@@ -165,6 +201,11 @@ class RasterLoader(QObject):
         return Path(self.file_path).with_suffix(Path(self.file_path).suffix + '.ovr')
 
     def _ensure_overviews(self) -> bool:
+        """Build/reopen overviews while excluding concurrent raster reads."""
+        with QMutexLocker(self._read_mutex):
+            return self._ensure_overviews_locked()
+
+    def _ensure_overviews_locked(self) -> bool:
         """Pastikan file .ovr ada di disk.  Kalau belum ada, bangun sekarang.
 
         Persis seperti yang QGIS lakukan saat kamu klik
@@ -477,11 +518,16 @@ class RasterLoader(QObject):
         return self.global_statistics
 
     def close(self) -> None:
-        """Close the dataset and clear cached data"""
-        if self.dataset:
-            self.logger.info(f"Closing dataset: {Path(self.file_path).name if self.file_path else 'unknown'}")
-            self.dataset.close()
-            self.dataset = None
-        self.global_statistics = None
-        self._ovr_ready = False
-        self.logger.debug("Dataset closed and cache cleared")
+        """Close the GDAL dataset safely after active reads finish."""
+        with QMutexLocker(self._read_mutex):
+            if self.dataset is not None:
+                self.logger.info(
+                    f"Closing dataset: {Path(self.file_path).name if self.file_path else 'unknown'}"
+                )
+                self.dataset.close()
+                self.dataset = None
+            self.file_path = None
+            self.metadata = {}
+            self.global_statistics = None
+            self._ovr_ready = False
+            self.logger.debug("Dataset closed and cache cleared")

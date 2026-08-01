@@ -8,10 +8,11 @@ from utils.logger_config import get_logger
 
 
 class TileCache:
-    """Cache LRU untuk tile raster."""
-    def __init__(self, max_tiles=50):
+    """Thread-safe LRU cache bounded by memory instead of tile count."""
+    def __init__(self, max_bytes=512 * 1024 * 1024):
         self.cache = OrderedDict()
-        self.max_tiles = max_tiles
+        self.max_bytes = max_bytes
+        self.current_bytes = 0
         self.lock = threading.Lock()
 
     def get(self, key):
@@ -22,26 +23,33 @@ class TileCache:
         return None
 
     def put(self, key, value):
+        if value is None:
+            return
+
+        value_bytes = int(getattr(value, "nbytes", 0))
+        if value_bytes <= 0 or value_bytes > self.max_bytes:
+            return
+
         with self.lock:
             if key in self.cache:
-                self.cache.move_to_end(key)
-            else:
-                self.cache[key] = value
+                old_value = self.cache.pop(key)
+                self.current_bytes -= int(getattr(old_value, "nbytes", 0))
 
-                if len(self.cache) > self.max_tiles:
-                    self.cache.popitem(last=False)
+            self.cache[key] = value
+            self.current_bytes += value_bytes
+
+            while self.current_bytes > self.max_bytes and self.cache:
+                _, old_value = self.cache.popitem(last=False)
+                self.current_bytes -= int(getattr(old_value, "nbytes", 0))
 
     def clear(self):
         with self.lock:
             self.cache.clear()
+            self.current_bytes = 0
 
     def get_memory_usage(self):
-        total = 0
         with self.lock:
-            for tile in self.cache.values():
-                if tile is not None:
-                    total += tile.nbytes
-        return total / (1024 * 1024)
+            return self.current_bytes / (1024 * 1024)
 
 
 class TileManager(QObject):
@@ -52,7 +60,7 @@ class TileManager(QObject):
         self.logger = get_logger(__name__)
         self.raster_loader = raster_loader
         self.tile_size = tile_size
-        self.tile_cache = TileCache(max_tiles=500)  # Optimized for balance between performance and memory
+        self.tile_cache = TileCache(max_bytes=512 * 1024 * 1024)
         self.use_full_resolution = False
         self.global_statistics = None  # Global statistics for consistent color normalization
 
@@ -68,8 +76,8 @@ class TileManager(QObject):
             f"TileManager initialized | "
             f"Tile size: {tile_size}x{tile_size} | "
             f"Image: {metadata['width']}x{metadata['height']} | "
-            f"Max tiles: 500 | "
-            f"Estimated cache: ~{(500 * 768) / 1024:.1f} MB"
+            f"Max cache: 512 MB | "
+            f"Current cache: {self.tile_cache.get_memory_usage():.1f} MB"
         )
 
     def enable_full_resolution(self, enabled=True):
@@ -120,7 +128,8 @@ class TileManager(QObject):
     def get_tile(self, tile_x, tile_y, zoom_level=1.0):
         """Get a tile from cache or load it"""
         band_key = tuple(self.display_band_indexes) if self.display_band_indexes else None
-        cache_key = (tile_x, tile_y, zoom_level, self.use_full_resolution, band_key)
+        overview_level = self.raster_loader.select_overview_level(zoom_level)
+        cache_key = (tile_x, tile_y, overview_level, self.use_full_resolution, band_key)
 
         cached = self.tile_cache.get(cache_key)
         if cached is not None:
@@ -128,14 +137,14 @@ class TileManager(QObject):
             return cached
 
         self.logger.debug(f"Cache MISS | Tile ({tile_x}, {tile_y}) - loading from disk")
-        tile_data = self._load_tile(tile_x, tile_y, zoom_level)
+        tile_data = self._load_tile(tile_x, tile_y, zoom_level, overview_level)
 
         if tile_data is not None:
             self.tile_cache.put(cache_key, tile_data)
 
         return tile_data
 
-    def _load_tile(self, tile_x, tile_y, zoom_level):
+    def _load_tile(self, tile_x, tile_y, zoom_level, overview_level=0):
         """Load a tile from the raster dataset"""
         if not self.raster_loader.dataset:
             self.logger.warning("_load_tile called but no dataset available")
@@ -165,7 +174,8 @@ class TileManager(QObject):
                 x_offset, y_offset,
                 width, height,
                 scale=scale,
-                band_indexes=band_indexes
+                band_indexes=band_indexes,
+                overview_level=overview_level,
             )
 
             if tile_data is not None:
@@ -221,5 +231,6 @@ class TileManager(QObject):
         return {
             'cached_tiles': len(self.tile_cache.cache),
             'memory_mb': self.tile_cache.get_memory_usage(),
-            'full_resolution': self.use_full_resolution
+            'full_resolution': self.use_full_resolution,
+            'max_cache_mb': self.tile_cache.max_bytes / (1024 * 1024),
         }

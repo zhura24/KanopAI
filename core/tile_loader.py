@@ -25,13 +25,14 @@ from utils.constants import (
 
 
 class TileLoadSignals(QObject):
-    tile_loaded = pyqtSignal(int, int, object)
+    tile_loaded = pyqtSignal(int, int, int, int, object)
     load_complete = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
 
 class TileLoadWorker(QRunnable):
-    def __init__(self, tile_manager: Any, tile_x: int, tile_y: int, zoom_level: int, 
+    def __init__(self, tile_manager: Any, tile_x: int, tile_y: int, zoom_level: int,
+                 generation: int = 0,
                  global_stats: Optional[List[Dict[str, float]]] = None, 
                  use_normalization: bool = False) -> None:
         super().__init__()
@@ -39,6 +40,7 @@ class TileLoadWorker(QRunnable):
         self.tile_x = tile_x
         self.tile_y = tile_y
         self.zoom_level = zoom_level
+        self.generation = generation
         self.global_stats = global_stats
         self.use_normalization = use_normalization
         self.signals = TileLoadSignals()
@@ -51,11 +53,15 @@ class TileLoadWorker(QRunnable):
             if tile_data is not None:
                 # QImage is thread-safe; QPixmap conversion happens on main thread
                 qimage = self._convert_to_pixmap(tile_data)
-                self.signals.tile_loaded.emit(self.tile_x, self.tile_y, qimage)
+                level = self.tile_manager.raster_loader.select_overview_level(self.zoom_level)
+                self.signals.tile_loaded.emit(self.tile_x, self.tile_y, level, self.generation, qimage)
             else:
-                self.signals.tile_loaded.emit(self.tile_x, self.tile_y, None)
+                level = self.tile_manager.raster_loader.select_overview_level(self.zoom_level)
+                self.signals.tile_loaded.emit(self.tile_x, self.tile_y, level, self.generation, None)
 
         except Exception as e:
+            level = self.tile_manager.raster_loader.select_overview_level(self.zoom_level)
+            self.signals.tile_loaded.emit(self.tile_x, self.tile_y, level, self.generation, None)
             self.signals.error_occurred.emit(f"Error loading tile ({self.tile_x}, {self.tile_y}): {str(e)}")
 
     def _convert_to_pixmap(self, tile_data: Optional[NDArray[np.float32]]) -> Optional[QImage]:
@@ -176,7 +182,8 @@ class AsyncTileLoader(QObject):
         self.pending_tiles = {}
         self.loading_tiles = set()
         self.loaded_pixmaps = OrderedDict()
-        self.max_pixmap_cache = MAX_TILE_CACHE_SIZE
+        self.max_pixmap_cache_bytes = 512 * 1024 * 1024
+        self.pixmap_cache_bytes = 0
 
         self.load_timer = QTimer()
         self.load_timer.setSingleShot(True)
@@ -187,6 +194,8 @@ class AsyncTileLoader(QObject):
         self.viewport_center = None
         self.use_color_normalization = False
         self.current_zoom_level = 1.0
+        self.current_overview_level = 0
+        self.generation = 0
         self.paused = False
 
         self.logger.info(
@@ -194,7 +203,7 @@ class AsyncTileLoader(QObject):
             f"Max threads: {self.thread_pool.maxThreadCount()} | "
             f"Batch size: {self.batch_size} | "
             f"Debounce: {self.debounce_delay}ms | "
-            f"Max pixmap cache: {self.max_pixmap_cache}"
+            f"Max pixmap cache: {self.max_pixmap_cache_bytes / (1024 * 1024):.0f} MB"
         )
 
     def request_tiles(self, tile_manager: Any, required_tiles: List[Tuple[int, int]], 
@@ -213,12 +222,15 @@ class AsyncTileLoader(QObject):
         self.tile_manager = tile_manager
         self.viewport_center = viewport_center
         self.current_zoom_level = zoom_level
+        overview_level = tile_manager.raster_loader.select_overview_level(zoom_level)
+
+        self.current_overview_level = overview_level
 
         new_tiles_needed = 0
         for tx, ty in required_tiles:
-            key = (tx, ty)
+            key = (overview_level, tx, ty)
             if key not in self.loaded_pixmaps and key not in self.loading_tiles:
-                self.pending_tiles[key] = (tx, ty)
+                self.pending_tiles[key] = (overview_level, tx, ty)
                 new_tiles_needed += 1
 
         self.logger.info(
@@ -252,7 +264,7 @@ class AsyncTileLoader(QObject):
             try:
                 cx, cy = self.viewport_center
                 def _dist(item):
-                    key, (tx, ty) = item
+                    key, (_, tx, ty) = item
                     return abs(tx - cx) + abs(ty - cy)
 
                 tiles_list.sort(key=_dist)
@@ -270,7 +282,7 @@ class AsyncTileLoader(QObject):
         if self.tile_manager and hasattr(self.tile_manager, 'global_statistics'):
             global_stats = self.tile_manager.global_statistics
 
-        for key, (tx, ty) in tiles_to_load:
+        for key, (overview_level, tx, ty) in tiles_to_load:
             self.loading_tiles.add(key)
             try:
                 del self.pending_tiles[key]
@@ -281,6 +293,7 @@ class AsyncTileLoader(QObject):
                 self.tile_manager,
                 tx, ty,
                 self.current_zoom_level,
+                generation=self.generation,
                 global_stats=global_stats,
                 use_normalization=self.use_color_normalization
             )
@@ -290,8 +303,22 @@ class AsyncTileLoader(QObject):
         if self.pending_tiles:
             QTimer.singleShot(TILE_BATCH_INTERVAL_MS, self._process_tile_queue)
 
-    def _on_tile_loaded(self, tile_x: int, tile_y: int, pixmap: Optional[QImage]) -> None:
+    def _on_tile_loaded(
+        self,
+        tile_x: int,
+        tile_y: int,
+        overview_level: int,
+        generation: int,
+        pixmap: Optional[QImage],
+    ) -> None:
         """Handle tile loaded callback"""
+        if generation != self.generation:
+            self.logger.debug(
+                "Ignoring stale tile callback from generation %s (current %s)",
+                generation,
+                self.generation,
+            )
+            return
         if pixmap is not None:
             try:
                 if isinstance(pixmap, QImage):
@@ -302,32 +329,28 @@ class AsyncTileLoader(QObject):
                 self.logger.warning(f"Could not convert QImage to QPixmap: {e}")
                 pix = None
 
-            key = (tile_x, tile_y)
+            key = (overview_level, tile_x, tile_y)
             if pix is not None:
+                pixmap_bytes = self._pixmap_size_bytes(pix)
+                old_pixmap = self.loaded_pixmaps.pop(key, None)
+                if old_pixmap is not None:
+                    self.pixmap_cache_bytes -= self._pixmap_size_bytes(old_pixmap)
                 self.loaded_pixmaps[key] = pix
+                self.pixmap_cache_bytes += pixmap_bytes
             try:
                 self.loaded_pixmaps.move_to_end(key)
             except Exception as e:
                 self.logger.debug(f"Failed to move tile to end of cache: {e}")
 
-            # LRU eviction
-            if len(self.loaded_pixmaps) > self.max_pixmap_cache:
-                cleanup_count = int(self.max_pixmap_cache * TILE_CACHE_CLEANUP_PERCENT)
-                removed = 0
-                while removed < cleanup_count and self.loaded_pixmaps:
-                    try:
-                        self.loaded_pixmaps.popitem(last=False)
-                        removed += 1
-                    except Exception as e:
-                        self.logger.debug(f"Failed to remove cached pixmap item: {e}")
-                        break
-                self.logger.debug(f"Pixmap cache cleanup | Removed: {removed} | Remaining: {len(self.loaded_pixmaps)}")
+            while self.pixmap_cache_bytes > self.max_pixmap_cache_bytes and self.loaded_pixmaps:
+                _, old_pixmap = self.loaded_pixmaps.popitem(last=False)
+                self.pixmap_cache_bytes -= self._pixmap_size_bytes(old_pixmap)
 
             self.logger.debug(f"Tile ready | ({tile_x}, {tile_y}) | Cache size: {len(self.loaded_pixmaps)}")
         else:
             self.logger.warning(f"Tile failed to load | ({tile_x}, {tile_y})")
 
-        key_to_remove = (tile_x, tile_y)
+        key_to_remove = (overview_level, tile_x, tile_y)
         self.loading_tiles.discard(key_to_remove)
 
         self.tiles_ready.emit()
@@ -339,9 +362,23 @@ class AsyncTileLoader(QObject):
                 self.logger.debug(f"Continuing tile loading | Remaining: {remaining} | Active threads: {active_threads}")
                 self._process_tile_queue()
 
-    def get_loaded_pixmap(self, tile_x: int, tile_y: int) -> Optional[QPixmap]:
-        key = (tile_x, tile_y)
+    def get_loaded_pixmap(
+        self,
+        tile_x: int,
+        tile_y: int,
+        overview_level: Optional[int] = None,
+    ) -> Optional[QPixmap]:
+        if overview_level is None:
+            overview_level = self.current_overview_level
+        key = (overview_level, tile_x, tile_y)
         return self.loaded_pixmaps.get(key)
+
+    @staticmethod
+    def _pixmap_size_bytes(pixmap: QPixmap) -> int:
+        """Estimate QPixmap memory without relying on a Qt-version-specific API."""
+        if pixmap is None or pixmap.isNull():
+            return 0
+        return max(1, pixmap.width() * pixmap.height() * 4)
 
     def cancel_all_pending(self) -> None:
         """Cancel all pending tile load requests (but keep cache)"""
@@ -358,14 +395,24 @@ class AsyncTileLoader(QObject):
 
     def clear_cache(self) -> None:
         """Clear all cached tiles and pending requests"""
+        self.generation += 1
         cache_size = len(self.loaded_pixmaps)
         pending_count = len(self.pending_tiles)
         self.logger.info(f"Clearing tile loader cache | Cached: {cache_size} | Pending: {pending_count}")
 
         self.loaded_pixmaps.clear()
+        self.pixmap_cache_bytes = 0
         self.pending_tiles.clear()
         self.loading_tiles.clear()
         self.thread_pool.clear()
 
     def set_tile_manager(self, tile_manager):
+        self.generation += 1
         self.tile_manager = tile_manager
+        self.current_overview_level = 0
+        self.pending_tiles.clear()
+        self.loading_tiles.clear()
+        self.loaded_pixmaps.clear()
+        self.pixmap_cache_bytes = 0
+        if self.load_timer.isActive():
+            self.load_timer.stop()

@@ -8,6 +8,8 @@ correction plus shapefile export for raw and corrected detections.
 
 from typing import Optional, Dict, Any, List
 import logging
+import shutil
+import sys
 from pathlib import Path
 import time
 
@@ -24,6 +26,7 @@ from ui.widgets.collapsible_box import CollapsibleBox
 from core.multispectral_worker import MultispectralInferenceWorker
 from core.inference_engine import InferenceResult, register_model_in_sqlite, load_model_from_sqlite, list_models_in_sqlite
 from ui.dialogs.band_mismatch_dialog import resolve_band_matching
+from ui.dialogs.correction_metadata_dialog import request_correction_metadata
 
 
 class InferencePanel(CollapsibleBox):
@@ -44,14 +47,15 @@ class InferencePanel(CollapsibleBox):
         self._manual_band_mapping: Optional[Dict[int, int]] = None
         self._enable_adaptive_fallback: bool = False
         self._model_loaded_from_db: bool = False
+        self.correction_reviewer_name: str = ""
+        self.correction_date: str = ""
 
         # AOI/Exclude polygon selection (from drawn polygons)
         self._aoi_polygon_ids: List[int] = []
         self._exclude_polygon_ids: List[int] = []
 
         # SQLite database path
-        self.db_path = str(Path.home() / ".kanopai" / "kanopai_models.db")
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = str(self._get_database_path())
 
         # Timer untuk kalkulasi ETA
         self._start_time: float = 0.0
@@ -59,6 +63,29 @@ class InferencePanel(CollapsibleBox):
         self._timer_eta.timeout.connect(self._update_eta_label)
 
         self.init_ui()
+
+    def _get_database_path(self) -> Path:
+        """Use a database beside the app, with a writable-user fallback."""
+        if getattr(sys, "frozen", False):
+            app_dir = Path(sys.executable).resolve().parent
+        else:
+            app_dir = Path(__file__).resolve().parents[2]
+
+        app_db_dir = app_dir / "data"
+        app_db_path = app_db_dir / "kanopai_models.db"
+        legacy_db_path = Path.home() / ".kanopai" / "kanopai_models.db"
+
+        try:
+            app_db_dir.mkdir(parents=True, exist_ok=True)
+            if not app_db_path.exists() and legacy_db_path.exists():
+                shutil.copy2(legacy_db_path, app_db_path)
+            return app_db_path
+        except OSError as error:
+            self.logger.warning(
+                "App folder is not writable; using user database directory: %s", error
+            )
+            legacy_db_path.parent.mkdir(parents=True, exist_ok=True)
+            return legacy_db_path
 
     def init_ui(self) -> None:
         """Initialize UI components for the multispectral detector panel."""
@@ -736,6 +763,10 @@ class InferencePanel(CollapsibleBox):
             )
             return
 
+        # Each inference result gets its own correction audit metadata.
+        self.correction_reviewer_name = ""
+        self.correction_date = ""
+
         # Band mismatch dialog — forced / manual matching
         manual_mapping, adaptive_fallback, proceed = resolve_band_matching(
             self.main_window, raster_path, self.band_stats_path
@@ -957,12 +988,18 @@ class InferencePanel(CollapsibleBox):
     def _toggle_add_box_mode(self, checked: bool) -> None:
         if checked:
             self.btn_edit_box.setChecked(False)
+            if not self._ensure_correction_metadata():
+                self.btn_add_box.setChecked(False)
+                return
         if hasattr(self.main_window, "set_inference_box_mode"):
             self.main_window.set_inference_box_mode("add" if checked else "none")
 
     def _toggle_edit_box_mode(self, checked: bool) -> None:
         if checked:
             self.btn_add_box.setChecked(False)
+            if not self._ensure_correction_metadata():
+                self.btn_edit_box.setChecked(False)
+                return
         if hasattr(self.main_window, "set_inference_box_mode"):
             self.main_window.set_inference_box_mode("edit" if checked else "none")
         if not checked:
@@ -980,14 +1017,32 @@ class InferencePanel(CollapsibleBox):
         if hasattr(self.main_window, "redo_inference_box_action"):
             self.main_window.redo_inference_box_action()
 
+    def _ensure_correction_metadata(self) -> bool:
+        """Ask once before editing and reuse metadata for the corrected export."""
+        if self.correction_reviewer_name and self.correction_date:
+            return True
+        result = request_correction_metadata(
+            self.main_window,
+            self.correction_reviewer_name,
+        )
+        if result is None:
+            return False
+        self.correction_reviewer_name, self.correction_date = result
+        return True
+
     def update_undo_redo_states(self, can_undo: bool, can_redo: bool) -> None:
         self.btn_undo.setEnabled(can_undo)
         self.btn_redo.setEnabled(can_redo)
 
     def export_shapefiles(self) -> None:
         """Export two shapefile datasets: raw_detection.shp and corrected_detection.shp."""
+        if not self._ensure_correction_metadata():
+            return
         if hasattr(self.main_window, "export_inference_shapefiles"):
-            self.main_window.export_inference_shapefiles()
+            self.main_window.export_inference_shapefiles(
+                self.correction_reviewer_name,
+                self.correction_date,
+            )
         else:
             QMessageBox.information(self.main_window, "Export", "Exporting shapefiles...")
 
@@ -1001,11 +1056,11 @@ class InferencePanel(CollapsibleBox):
             )
             return
 
-        # Ambil boxes aktif (bukan yang dieliminasi)
+        # Use active boxes only; eliminated boxes remain in the audit export.
         active_boxes = [
             item.get_box_coords()
             for item in handler.box_items
-            if item.status != "dieliminasi" and item.isVisible()
+            if item.status != "eliminated" and item.isVisible()
         ]
 
         if not active_boxes:

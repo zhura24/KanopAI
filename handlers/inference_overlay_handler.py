@@ -50,7 +50,7 @@ class InferenceBoxItem(QGraphicsRectItem):
     """Item QGraphicsRectItem interaktif untuk bounding box deteksi."""
 
     def __init__(self, box_id: int, box: List[float], score: float, class_name: str,
-                 status: str = "dipertahankan", parent_handler: Optional['InferenceOverlayHandler'] = None) -> None:
+                 status: str = "retained", parent_handler: Optional['InferenceOverlayHandler'] = None) -> None:
         x1, y1, x2, y2 = box
         w = max(1.0, x2 - x1)
         h = max(1.0, y2 - y1)
@@ -90,15 +90,15 @@ class InferenceBoxItem(QGraphicsRectItem):
         return [float(r.x()), float(r.y()), float(r.x() + r.width()), float(r.y() + r.height())]
 
     def apply_style(self) -> None:
-        if self.status == "dieliminasi":
+        if self.status == "eliminated":
             pen_color = QColor(239, 68, 68, 180)
             fill_color = QColor(239, 68, 68, 30)
             pen_style = Qt.PenStyle.DashLine
-        elif self.status == "ditambahkan":
+        elif self.status == "added":
             pen_color = QColor(6, 182, 212, 230)
             fill_color = QColor(6, 182, 212, 50)
             pen_style = Qt.PenStyle.SolidLine
-        elif self.status == "diedit":
+        elif self.status == "edited":
             pen_color = QColor(234, 179, 8, 230)
             fill_color = QColor(234, 179, 8, 50)
             pen_style = Qt.PenStyle.SolidLine
@@ -112,7 +112,7 @@ class InferenceBoxItem(QGraphicsRectItem):
         self.setBrush(QBrush(fill_color))
 
         is_edit_active = self.parent_handler and self.parent_handler.current_mode == "edit"
-        show_handles = self.isSelected() and is_edit_active and self.status != "dieliminasi"
+        show_handles = self.isSelected() and is_edit_active and self.status != "eliminated"
         for h in self.handles.values():
             h.setVisible(show_handles)
 
@@ -263,7 +263,7 @@ class InferenceOverlayHandler(QObject):
                     return True
                 item = item.parentItem() if hasattr(item, 'parentItem') else None
 
-            if isinstance(item, InferenceBoxItem) and item.status != "dieliminasi":
+            if isinstance(item, InferenceBoxItem) and item.status != "eliminated":
                 for bi in self.box_items:
                     bi.setSelected(bi is item)
                 self._move_start_pos = scene_pos
@@ -310,7 +310,7 @@ class InferenceOverlayHandler(QObject):
             return True
 
         if self.current_mode == "edit" and self._move_start_pos is not None:
-            selected = [i for i in self.box_items if i.isSelected() and i.status != "dieliminasi"]
+            selected = [i for i in self.box_items if i.isSelected() and i.status != "eliminated"]
             if selected:
                 delta = scene_pos - self._move_start_pos
                 item = selected[0]
@@ -341,18 +341,18 @@ class InferenceOverlayHandler(QObject):
 
         if self.current_mode == "edit":
             if self._active_handle or self._move_start_pos is not None:
-                selected = [i for i in self.box_items if i.isSelected() and i.status != "dieliminasi"]
+                selected = [i for i in self.box_items if i.isSelected() and i.status != "eliminated"]
                 for item in selected:
                     new_box = item.get_box_coords()
                     if self._edit_old_box and new_box != self._edit_old_box:
-                        item.status = "diedit"
+                        item.status = "edited"
                         item.apply_style()
                         self.undo_stack.push_action({
                             "type": "edit",
                             "item": item,
                             "old_box": self._edit_old_box,
                             "new_box": new_box,
-                            "old_status": self._edit_old_status or "dipertahankan",
+                            "old_status": self._edit_old_status or "retained",
                         })
                         self._update_panel_ui()
             self._active_handle = None
@@ -373,7 +373,7 @@ class InferenceOverlayHandler(QObject):
             box=box,
             score=1.0,
             class_name="manual",
-            status="ditambahkan",
+            status="added",
             parent_handler=self,
         )
         self._apply_interaction_flags(item)
@@ -455,7 +455,7 @@ class InferenceOverlayHandler(QObject):
                 box=[x1, y1, x2, y2],
                 score=float(score),
                 class_name=cls_name,
-                status="dipertahankan",
+                status="retained",
                 parent_handler=self,
             )
             self._apply_interaction_flags(item)
@@ -514,7 +514,7 @@ class InferenceOverlayHandler(QObject):
             has_sel = any(item.isSelected() for item in self.box_items)
             panel.btn_delete_box.setEnabled(has_sel)
 
-        selected = [i for i in self.box_items if i.isSelected() and i.status != "dieliminasi"]
+        selected = [i for i in self.box_items if i.isSelected() and i.status != "eliminated"]
         self._update_box_info(selected[0] if selected else None)
 
     def _update_box_info(self, item: Optional[InferenceBoxItem]) -> None:
@@ -542,10 +542,10 @@ class InferenceOverlayHandler(QObject):
             return
 
         for item in selected:
-            if item.status == "dieliminasi":
+            if item.status == "eliminated":
                 continue
             old_status = item.status
-            item.status = "dieliminasi"
+            item.status = "eliminated"
             item.setVisible(False)
             item.apply_style()
             self.undo_stack.push_action({
@@ -589,17 +589,17 @@ class InferenceOverlayHandler(QObject):
         item = act["item"]
 
         if t == "delete":
-            item.status = "dieliminasi"
+            item.status = "eliminated"
             item.setVisible(False)
             item.apply_style()
         elif t == "add":
             item.setVisible(True)
-            item.status = "ditambahkan"
+            item.status = "added"
             item.apply_style()
         elif t == "edit":
             new_box = act["new_box"]
             item.setRect(new_box[0], new_box[1], new_box[2] - new_box[0], new_box[3] - new_box[1])
-            item.status = "diedit"
+            item.status = "edited"
             item.update_handle_positions()
             item.apply_style()
 
@@ -611,11 +611,15 @@ class InferenceOverlayHandler(QObject):
             return
 
         raw_count = len(self.raw_boxes_backup)
-        active_items = [it for it in self.box_items if it.status != "dieliminasi" and it.isVisible()]
+        active_items = [it for it in self.box_items if it.status != "eliminated" and it.isVisible()]
         panel.lbl_summary.setText(f"Raw: {raw_count} | Active: {len(active_items)} boxes")
         panel.update_undo_redo_states(self.undo_stack.can_undo(), self.undo_stack.can_redo())
 
-    def export_shapefiles(self) -> None:
+    def export_shapefiles(
+        self,
+        reviewer_name: str = "",
+        correction_date: str = "",
+    ) -> None:
         """Export inference detections from the active raster.
 
         The export supports a custom output directory and optional output stem.
@@ -664,19 +668,18 @@ class InferenceOverlayHandler(QObject):
         active_box_records = []
 
         for item in self.box_items:
-            if item.status == "dieliminasi" or not item.isVisible():
-                continue
             b_coords = item.get_box_coords()
             corr_boxes.append(b_coords)
             corr_scores.append(item.score)
             corr_classes.append(0)
             corr_statuses.append(item.status)
             class_names_corr[0] = item.class_name
-            active_box_records.append({
-                "id": item.box_id,
-                "box": b_coords,
-                "class_name": item.class_name,
-            })
+            if item.status != "eliminated" and item.isVisible():
+                active_box_records.append({
+                    "id": item.box_id,
+                    "box": b_coords,
+                    "class_name": item.class_name,
+                })
 
         if not active_box_records and self.raw_boxes_backup:
             for idx, raw_box in enumerate(self.raw_boxes_backup, start=1):
@@ -696,7 +699,8 @@ class InferenceOverlayHandler(QObject):
                 out_shp=corrected_shp,
                 model_name="yolo_multispectral",
                 class_names=class_names_corr,
-                validator_name="User"
+                validator_name=reviewer_name,
+                correction_date=correction_date,
             )
 
         excel_path = self._export_inference_excel(p_raster, out_dir, output_stem, active_box_records)
@@ -725,7 +729,7 @@ class InferenceOverlayHandler(QObject):
             from utils.geospatial_utils import GeospatialMetrics
             import numpy as np
 
-            active_boxes = [item for item in self.box_items if item.status != "dieliminasi" and item.isVisible()]
+            active_boxes = [item for item in self.box_items if item.status != "eliminated" and item.isVisible()]
             if not active_boxes:
                 return None
 

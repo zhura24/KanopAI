@@ -25,6 +25,8 @@ class QuickRasterPreviewWorker(QObject):
     def run(self):
         try:
             preview_data = self.loader.get_overview(max_dimension=2048)
+            if self.loader.global_statistics is None:
+                self.loader.global_statistics = self.loader.get_global_statistics()
             metadata = self.loader.get_metadata()
             self.ready.emit(preview_data, metadata, self.loader)
         except Exception as e:
@@ -107,6 +109,14 @@ class RasterMixin:
 
     def _on_preview_ready(self, layer, data, metadata, loader):
         try:
+            if layer not in getattr(self, 'raster_layers', []):
+                self.logger.info("Ignoring preview for a layer that was already removed")
+                loader.close()
+                return
+            if getattr(self, 'active_layer_id', layer.get('id')) != layer.get('id'):
+                self.logger.debug("Ignoring preview for an inactive layer: %s", layer.get('name'))
+                return
+
             if data is not None:
                 # NOTE: previously this method manually picked bands (2,1,0),
                 # normalized them, and packed them into an (H, W, 3) array
@@ -130,11 +140,10 @@ class RasterMixin:
 
                 self.current_data = data
 
-                tile_manager = TileManager(loader, tile_size=256)
-                self.tile_manager = tile_manager
+                self.tile_manager = TileManager(loader, tile_size=512)
 
                 if hasattr(self, 'viewer') and self.viewer:
-                    self.viewer.set_tile_manager(tile_manager)
+                    self.viewer.set_tile_manager(loader)
                     self.viewer.set_geospatial_metadata(
                         metadata.get('transform'),
                         metadata.get('crs')

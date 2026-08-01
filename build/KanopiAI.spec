@@ -48,6 +48,13 @@ if model_dir.exists():
     for model_file in model_dir.glob("*.onnx"):
         datas.append((str(model_file), "model"))
 
+# Ship the local SQLite model registry when it exists. The application uses
+# this as its portable database and falls back to the user profile only when
+# the installed folder is not writable.
+database_path = ROOT / "data" / "kanopai_models.db"
+if database_path.exists():
+    datas.append((str(database_path), "data"))
+
 # Avoid duplicate entries introduced by collect_all().
 datas = list(dict.fromkeys(datas))
 binaries = list(dict.fromkeys(binaries))

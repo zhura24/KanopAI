@@ -102,6 +102,7 @@ class RasterViewer(QGraphicsView):
 
         self.tile_pixmap_items = {}
         self.current_tile_keys = set()
+        self.current_render_level = 0
         # Overlay items (rectangles used for tile previews / detections)
         self.overlay_items = []
         self._overlay_visible = False
@@ -734,13 +735,16 @@ class RasterViewer(QGraphicsView):
         if raster_loader and raster_loader.dataset:
             # Increase tile_size to improve per-tile resolution (trades memory for detail).
             # If this causes memory pressure on low-RAM machines, reduce back to 1024.
-            self.tile_manager = TileManager(raster_loader, tile_size=2048)  # Higher resolution tiles for more detail
+            self.tile_manager = TileManager(raster_loader, tile_size=512)
             self.async_tile_loader.set_tile_manager(self.tile_manager)
-            # Get global statistics for consistent color rendering (only if normalization is enabled)
-            if self.use_color_normalization:
-                self.global_statistics = raster_loader.get_global_statistics()
-            else:
-                self.global_statistics = None
+            # Statistics are prepared by QuickRasterPreviewWorker. Never
+            # recompute them synchronously while the GUI is being updated.
+            self.global_statistics = (
+                raster_loader.global_statistics
+                if self.use_color_normalization
+                else None
+            )
+            self.tile_manager.global_statistics = self.global_statistics
             # Sync normalization setting to tile loader
             self.async_tile_loader.use_color_normalization = self.use_color_normalization
 
@@ -750,6 +754,10 @@ class RasterViewer(QGraphicsView):
         else:
             self.tile_manager = None
             self.global_statistics = None
+            self.current_render_level = 0
+            if hasattr(self, "async_tile_loader"):
+                self.async_tile_loader.set_tile_manager(None)
+                self.async_tile_loader.clear_cache()
 
     def enable_full_resolution(self, enabled=True):
         self.use_full_resolution = enabled
@@ -925,6 +933,13 @@ class RasterViewer(QGraphicsView):
         try:
             viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
             metadata = self.tile_manager.raster_loader.get_metadata()
+            render_level = self.tile_manager.raster_loader.select_overview_level(self.zoom_factor)
+
+            if render_level != self.current_render_level:
+                # Keep the previous level visible while the new level loads.
+                # Individual tile items are replaced as soon as their matching
+                # resolution is ready, avoiding a blank canvas during zoom.
+                self.current_render_level = render_level
 
             vp_x = max(0, viewport_rect.x())
             vp_y = max(0, viewport_rect.y())
@@ -934,15 +949,18 @@ class RasterViewer(QGraphicsView):
             vp_x = min(vp_x, metadata['width'])
             vp_y = min(vp_y, metadata['height'])
 
-            start_tile_x = max(0, int(vp_x // self.tile_manager.tile_size))
-            start_tile_y = max(0, int(vp_y // self.tile_manager.tile_size))
+            tile_size = self.tile_manager.tile_size
+            # Keep one-tile margin around the viewport so short pans do not
+            # immediately require disk reads.
+            start_tile_x = max(0, int(vp_x // tile_size) - 1)
+            start_tile_y = max(0, int(vp_y // tile_size) - 1)
             end_tile_x = min(
-                int(np.ceil((vp_x + vp_w) / self.tile_manager.tile_size)),
-                int(np.ceil(metadata['width'] / self.tile_manager.tile_size))
+                int(np.ceil((vp_x + vp_w) / tile_size)) + 1,
+                int(np.ceil(metadata['width'] / tile_size))
             )
             end_tile_y = min(
-                int(np.ceil((vp_y + vp_h) / self.tile_manager.tile_size)),
-                int(np.ceil(metadata['height'] / self.tile_manager.tile_size))
+                int(np.ceil((vp_y + vp_h) / tile_size)) + 1,
+                int(np.ceil(metadata['height'] / tile_size))
             )
 
             # Visible tiles (priority)
@@ -962,9 +980,13 @@ class RasterViewer(QGraphicsView):
             tiles_to_remove = self.current_tile_keys - new_tile_keys
             for tx, ty in tiles_to_remove:
                 key = (tx, ty)
-                if key in self.tile_pixmap_items:
-                    self.scene.removeItem(self.tile_pixmap_items[key])
-                    del self.tile_pixmap_items[key]
+                item = self.tile_pixmap_items.pop(key, None)
+                if item is not None:
+                    try:
+                        if item.scene() is self.scene:
+                            self.scene.removeItem(item)
+                    except (RuntimeError, AttributeError):
+                        pass
 
             self.current_tile_keys = new_tile_keys
 
@@ -1108,6 +1130,9 @@ class RasterViewer(QGraphicsView):
                 return
 
             tile_size = self.tile_manager.tile_size
+            overview_decimation = self.tile_manager.raster_loader.get_overview_decimation(
+                self.current_render_level
+            )
             tiles_added = 0
             max_tiles_per_frame = 32  # Sweet spot: smooth progressive rendering without UI freeze
             has_more_tiles = False
@@ -1115,14 +1140,25 @@ class RasterViewer(QGraphicsView):
             for tx, ty in self.current_tile_keys:
                 key = (tx, ty)
 
-                if key in self.tile_pixmap_items:
-                    continue
+                existing_item = self.tile_pixmap_items.get(key)
+                if existing_item is not None:
+                    existing_level = existing_item.data(0)
+                    if existing_level == self.current_render_level:
+                        continue
 
-                pixmap = self.async_tile_loader.get_loaded_pixmap(tx, ty)
+                pixmap = self.async_tile_loader.get_loaded_pixmap(
+                    tx, ty, self.current_render_level
+                )
 
                 if pixmap is not None:
+                    if existing_item is not None:
+                        self.scene.removeItem(existing_item)
                     tile_item = QGraphicsPixmapItem(pixmap)
                     tile_item.setPos(tx * tile_size, ty * tile_size)
+                    # Overview pixels are read at a reduced resolution but
+                    # retain the full tile footprint in raster coordinates.
+                    tile_item.setScale(overview_decimation)
+                    tile_item.setData(0, self.current_render_level)
                     # Ensure tile items are non-interactive so they don't steal
                     # focus / mouse / wheel events from the view.
                     try:
@@ -1176,11 +1212,19 @@ class RasterViewer(QGraphicsView):
             self.logger.error(f"Error rendering tiles: {e}", exc_info=True)
 
     def _clear_tile_items(self):
-        for item in self.tile_pixmap_items.values():
-            self.scene.removeItem(item)
+        # scene.clear() may already have destroyed the C++ QGraphicsItems.
+        # Treat cleanup as idempotent so switching layers cannot abort when a
+        # stale Python wrapper points at an already-deleted Qt object.
+        for item in list(self.tile_pixmap_items.values()):
+            try:
+                if item is not None and item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except (RuntimeError, AttributeError):
+                pass
         self.tile_pixmap_items.clear()
         self.current_tile_keys.clear()
-        self.async_tile_loader.clear_cache()
+        if hasattr(self, "async_tile_loader"):
+            self.async_tile_loader.clear_cache()
 
     # ===== Overlay methods (tile preview / detection rectangles) =====
     def set_overlay_tiles(self, tile_rects, outline_color=QColor(147, 51, 234), fill_color=QColor(147, 51, 234, 80), outline_width=2):
@@ -1452,9 +1496,12 @@ class RasterViewer(QGraphicsView):
 
         # Update global statistics based on normalization setting
         if enabled and self.tile_manager:
-            self.global_statistics = self.tile_manager.raster_loader.get_global_statistics()
+            self.global_statistics = self.tile_manager.raster_loader.global_statistics
+            self.tile_manager.global_statistics = self.global_statistics
         else:
             self.global_statistics = None
+            if self.tile_manager:
+                self.tile_manager.global_statistics = None
 
     def show_raster(self, visible: bool = True):
         """Show or hide the main raster image (pixmap_item).

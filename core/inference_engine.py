@@ -803,7 +803,7 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
         shp.field("x2_px", "N", size=10, decimal=1)
         shp.field("y2_px", "N", size=10, decimal=1)
         # Field status -- shapefile hasil run() ini adalah "mentah" (belum
-        # dikoreksi manusia). Nilainya selalu "belum_dikoreksi" di sini;
+        # dikoreksi manusia). Nilainya selalu "not_corrected" di sini;
         # shapefile KE-2 (hasil koreksi pengguna) ditulis terpisah lewat
         # save_corrected_shapefile(), lihat di bawah.
         shp.field("status", "C", size=20)
@@ -818,7 +818,7 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
             shp.record(i, class_name, round(float(score), 4), model_name,
                        round(float(x1_px), 1), round(float(y1_px), 1),
                        round(float(x2_px), 1), round(float(y2_px), 1),
-                       "belum_dikoreksi")
+                       "not_corrected")
 
     # KNF-04: CRS harus konsisten dengan raster asal agar shapefile bisa
     # langsung dibuka di QGIS/software GIS lain -- sebelumnya crs_wkt dibaca
@@ -830,15 +830,16 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
 
 def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses,
                               out_shp: Path, model_name: str = "model_gabungan",
-                              class_names=None, validator_name: str = None):
+                              class_names=None, validator_name: str = None,
+                              correction_date: str = None):
     """KF-10 -- Shapefile KE-2, ditulis SETELAH pengguna mengoreksi hasil
     deteksi mentah dari save_shapefile() di GUI (mengeliminasi kotak yang
     merupakan false positive/gagal deteksi; TIDAK menambah kotak baru --
     fitur penambahan kotak manual sudah terpisah di aplikasi).
 
-    statuses: array/list sepanjang boxes, isi "dipertahankan" atau
-    "dieliminasi" (sesuai istilah di perancangan KF-10). Semua kotak hasil
-    deteksi awal tetap ditulis di sini (bukan cuma yang dipertahankan) untuk
+    statuses: array/list sepanjang boxes, with values such as "retained" or
+    "eliminated". Semua kotak hasil deteksi awal tetap ditulis di sini
+    (bukan cuma yang dipertahankan) untuk
     menjaga audit trail lengkap sesuai KNF-09.
     """
     import shapefile  # pyshp
@@ -859,9 +860,10 @@ def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses
         shp.field("y2_px", "N", size=10, decimal=1)
         shp.field("status", "C", size=20)
         shp.field("pengoreksi", "C", size=50)
-        shp.field("tgl_koreksi", "C", size=20)
+        # DBF field names are limited to 10 characters.
+        shp.field("tgl_koreks", "C", size=20)
 
-        tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
+        tgl = correction_date or datetime.now().strftime("%Y-%m-%d")
         for i, (cls, score, box, status) in enumerate(zip(classes, scores, boxes, statuses), start=1):
             x1_px, y1_px, x2_px, y2_px = box
             x1_geo, y1_geo = rasterio.transform.xy(raster_transform, y1_px, x1_px)

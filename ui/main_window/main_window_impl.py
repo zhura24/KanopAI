@@ -843,10 +843,14 @@ class MainWindow(
         if handler:
             handler.redo_action()
 
-    def export_inference_shapefiles(self) -> None:
+    def export_inference_shapefiles(
+        self,
+        reviewer_name: str = "",
+        correction_date: str = "",
+    ) -> None:
         handler = getattr(self, 'inference_overlay_handler', None)
         if handler:
-            handler.export_shapefiles()
+            handler.export_shapefiles(reviewer_name, correction_date)
 
     def _reset_detection_state(self):
         self.detection_result = None

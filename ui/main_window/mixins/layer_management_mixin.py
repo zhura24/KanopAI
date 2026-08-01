@@ -45,6 +45,8 @@ class LayerManagementMixin:
         # Remove from list
         self.raster_layers.remove(layer)
 
+        removed_loader = layer.get('loader')
+
         # Clear any active inference overlay state before switching or removing active layer
         if hasattr(self, 'inference_overlay_handler') and self.inference_overlay_handler:
             try:
@@ -87,6 +89,14 @@ class LayerManagementMixin:
             # Clear backward compatibility reference
             self.raster_loader = None
 
+        if removed_loader is not None and removed_loader not in [
+            current.get('loader') for current in self.raster_layers
+        ]:
+            try:
+                removed_loader.close()
+            except Exception as e:
+                self.logger.warning(f"Failed to close removed raster: {e}")
+
         # Refresh UI
         self._refresh_layer_list_ui()
 
@@ -125,6 +135,8 @@ class LayerManagementMixin:
             except Exception:
                 pass
 
+        loaders_to_close = [layer.get('loader') for layer in self.raster_layers]
+
         # Clear list
         self.raster_layers.clear()
         self.active_layer_id = None
@@ -158,6 +170,13 @@ class LayerManagementMixin:
 
         # Clear backward compatibility reference
         self.raster_loader = None
+
+        for loader in loaders_to_close:
+            if loader is not None:
+                try:
+                    loader.close()
+                except Exception as e:
+                    self.logger.warning(f"Failed to close raster during clear: {e}")
 
         # Clear inference overlay items if any
         if hasattr(self, 'inference_overlay_handler') and self.inference_overlay_handler:
