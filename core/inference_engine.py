@@ -507,6 +507,18 @@ def polygons_from_pixel_coords(polygon_coords_list: list) -> list:
     return polys
 
 
+def compute_visible_crop_region(width: int, height: int, viewport_rect: tuple) -> tuple:
+    """Clamp viewport bounds to raster dimensions and return (x, y, w, h)."""
+    x0, y0, x1, y1 = viewport_rect
+    x_min = max(0, min(int(x0), width))
+    y_min = max(0, min(int(y0), height))
+    x_max = min(width, max(int(x1), x_min))
+    y_max = min(height, max(int(y1), y_min))
+    if x_max <= x_min or y_max <= y_min:
+        return 0, 0, width, height
+    return x_min, y_min, max(1, x_max - x_min), max(1, y_max - y_min)
+
+
 def compute_aoi_crop_region(aoi_polys: list, width: int, height: int) -> tuple:
     """Hitung region crop (x, y, w, h) dari union bounding-box polygon AOI."""
     if not aoi_polys:
@@ -924,6 +936,132 @@ def load_detection_from_shapefile(shp_path: Path):
         np.asarray(scores, dtype=np.float32),
         classes,
         unique_names,
+    )
+
+
+def _derive_box_from_shape(shape, raster_transform=None, raster_bounds=None):
+    """Return pixel-space box from the actual polygon geometry when available.
+
+    The real geometry is the source of truth. DBF fields like x1_px/y1_px can be
+    stale, mismatched, or absent when a shapefile is imported from a different
+    source. If a raster transform is available we also convert georeferenced
+    polygon coordinates back to pixel coordinates; otherwise we fall back to the
+    original shape points directly.
+    """
+    if shape is None:
+        return None
+
+    pts = np.asarray(getattr(shape, "points", []), dtype=np.float64)
+    if pts.size == 0:
+        return None
+
+    if raster_transform is not None and raster_bounds is not None:
+        # If the polygon is georeferenced, convert geo -> pixel using the raster
+        # transform, but only if the coordinates are spatially within the raster
+        # bounds. This keeps imported results aligned with the viewer.
+        try:
+            px_pts = []
+            for gx, gy in pts:
+                col, row = (~raster_transform) * (gx, gy)
+                if 0 <= col <= raster_bounds[2] and 0 <= row <= raster_bounds[3]:
+                    px_pts.append((col, row))
+            if px_pts:
+                pts = np.asarray(px_pts, dtype=np.float64)
+        except Exception:
+            pass
+
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    if xs.size == 0 or ys.size == 0:
+        return None
+
+    x1 = float(np.min(xs))
+    y1 = float(np.min(ys))
+    x2 = float(np.max(xs))
+    y2 = float(np.max(ys))
+    if x2 <= x1:
+        x2 = x1 + 1.0
+    if y2 <= y1:
+        y2 = y1 + 1.0
+    return [x1, y1, x2, y2]
+
+
+def load_inference_result_from_shapefile(shp_path: Path, class_names: list = None, raster_path: Path = None):
+    """Load a saved inference SHP output into an InferenceResult structure.
+
+    The polygon geometry is treated as the source of truth because user-exported
+    shapefiles may have stale or mismatched column values after editing or re-use.
+    When a raster path is supplied, we also align georeferenced points to the
+    raster's pixel grid so imported boxes land in the correct preview position.
+    """
+    shp_path = Path(shp_path)
+    if not shp_path.is_file():
+        raise FileNotFoundError(f"Shapefile hasil inference tidak ditemukan: {shp_path}")
+
+    import shapefile
+    raster_transform = None
+    raster_bounds = None
+    if raster_path is not None:
+        raster_path = Path(raster_path)
+        if raster_path.exists():
+            try:
+                with rasterio.open(raster_path) as src:
+                    raster_transform = src.transform
+                    raster_bounds = (0, 0, src.width, src.height)
+            except Exception:
+                raster_transform = None
+                raster_bounds = None
+
+    with shapefile.Reader(str(shp_path)) as shp:
+        fields = [f[0] for f in shp.fields[1:]]
+        boxes = []
+        scores = []
+        class_labels = []
+
+        for record, shape in zip(shp.iterRecords(), shp.shapes()):
+            values = dict(zip(fields, record))
+
+            derived_box = _derive_box_from_shape(shape, raster_transform=raster_transform, raster_bounds=raster_bounds)
+            if derived_box is not None:
+                x1, y1, x2, y2 = derived_box
+            else:
+                x1 = float(values.get("x1_px", values.get("x1", 0.0)))
+                y1 = float(values.get("y1_px", values.get("y1", 0.0)))
+                x2 = float(values.get("x2_px", values.get("x2", 0.0)))
+                y2 = float(values.get("y2_px", values.get("y2", 0.0)))
+                if x2 <= x1:
+                    x2 = x1 + 1.0
+                if y2 <= y1:
+                    y2 = y1 + 1.0
+
+            boxes.append([x1, y1, x2, y2])
+            scores.append(float(values.get("confidence", values.get("score", 0.0))))
+            label = str(values.get("kelas", values.get("class", values.get("label", "sawit"))))
+            class_labels.append(label or "sawit")
+
+    if not boxes:
+        return InferenceResult(
+            boxes=np.zeros((0, 4), dtype=np.float32),
+            scores=np.zeros((0,), dtype=np.float32),
+            classes=np.zeros((0,), dtype=np.int32),
+            class_names=[] if class_names is None else list(class_names),
+            shp_path=shp_path,
+        )
+
+    unique_names = []
+    for label in class_labels:
+        if label not in unique_names:
+            unique_names.append(label)
+    if class_names is not None:
+        unique_names = list(class_names)
+    classes = np.array([unique_names.index(label) for label in class_labels], dtype=np.int32)
+
+    return InferenceResult(
+        boxes=np.asarray(boxes, dtype=np.float32),
+        scores=np.asarray(scores, dtype=np.float32),
+        classes=classes,
+        class_names=unique_names,
+        shp_path=shp_path,
     )
 
 

@@ -24,7 +24,13 @@ from PyQt6.QtGui import QColor, QFont, QCursor
 
 from ui.widgets.collapsible_box import CollapsibleBox
 from core.multispectral_worker import MultispectralInferenceWorker
-from core.inference_engine import InferenceResult, register_model_in_sqlite, load_model_from_sqlite, list_models_in_sqlite
+from core.inference_engine import (
+    InferenceResult,
+    register_model_in_sqlite,
+    load_model_from_sqlite,
+    list_models_in_sqlite,
+    load_inference_result_from_shapefile,
+)
 from ui.dialogs.band_mismatch_dialog import resolve_band_matching
 from ui.dialogs.correction_metadata_dialog import request_correction_metadata
 
@@ -203,6 +209,11 @@ class InferencePanel(CollapsibleBox):
         self.spin_batch_size.setValue(4)
         self.spin_batch_size.setToolTip("Batch size for GPU/CPU parallel inference")
         param_form.addRow("Batch Size:", self.spin_batch_size)
+
+        self.combo_processed_area = QComboBox()
+        self.combo_processed_area.addItems(["Visible part", "Entire layer", "From polygons (shapefile)"])
+        self.combo_processed_area.setToolTip("Restrict processing area for multispectral inference")
+        param_form.addRow("Processed area:", self.combo_processed_area)
 
         main_layout.addLayout(param_form)
 
@@ -460,7 +471,7 @@ class InferencePanel(CollapsibleBox):
         main_layout.addLayout(undo_layout)
 
         # Export Buttons System (2 shapefiles: raw & corrected)
-        self.btn_export_shapefiles = QPushButton("Export Shapefiles (Raw, Corrected & Metrics)")
+        self.btn_export_shapefiles = QPushButton("Export Result")
         self.btn_export_shapefiles.setEnabled(False)
         self.btn_export_shapefiles.setMinimumHeight(32)
         self.btn_export_shapefiles.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -478,6 +489,23 @@ class InferencePanel(CollapsibleBox):
         """)
         self.btn_export_shapefiles.clicked.connect(self.export_shapefiles)
         main_layout.addWidget(self.btn_export_shapefiles)
+
+        self.btn_import_shapefiles = QPushButton("Import Result (SHP)")
+        self.btn_import_shapefiles.setMinimumHeight(32)
+        self.btn_import_shapefiles.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_import_shapefiles.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: white;
+                font-weight: bold;
+                font-size: 11px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #1d4ed8; }
+        """)
+        self.btn_import_shapefiles.clicked.connect(self.import_inference_shapefile)
+        main_layout.addWidget(self.btn_import_shapefiles)
 
         # Convert to Centroids button
         self.btn_convert_to_centroids = QPushButton("Convert to Centroids")
@@ -752,6 +780,33 @@ class InferencePanel(CollapsibleBox):
     # =========================================================================
     # INFERENCE EXECUTION WORKFLOW
     # =========================================================================
+    def _compute_visible_crop_for_raster(self) -> Optional[tuple]:
+        """Return the current visible viewport crop in raster pixel coordinates.
+
+        The view may be zoomed or panned, so we convert the viewport rect to scene
+        coordinates and clamp it to the raster bounds before returning an AOI crop.
+        If the viewport is effectively the full raster, we still return the full
+        raster bounds so the inference remains consistent.
+        """
+        try:
+            viewer = self.main_window.viewer
+            if viewer is None:
+                return None
+
+            scene_rect = viewer.mapToScene(viewer.viewport().rect()).boundingRect()
+            x0 = int(max(0, min(scene_rect.left(), scene_rect.right())))
+            y0 = int(max(0, min(scene_rect.top(), scene_rect.bottom())))
+            x1 = int(min(max(scene_rect.right(), x0), getattr(self.main_window.raster_loader, 'width', 0) or self.main_window.raster_loader.get_metadata()['width']))
+            y1 = int(min(max(scene_rect.bottom(), y0), getattr(self.main_window.raster_loader, 'height', 0) or self.main_window.raster_loader.get_metadata()['height']))
+
+            if x1 <= x0 or y1 <= y0:
+                return None
+
+            return x0, y0, x1, y1
+        except Exception as exc:
+            self.logger.warning(f"Visible-area crop calculation failed: {exc}")
+            return None
+
     def run_inference(self) -> None:
         """Run the inference worker thread."""
         raster_path = self._get_active_raster_path()
@@ -796,6 +851,30 @@ class InferencePanel(CollapsibleBox):
         aoi_polygons_px = self._get_polygon_coords_by_ids(self._aoi_polygon_ids) or None
         exclude_polygons_px = self._get_polygon_coords_by_ids(self._exclude_polygon_ids) or None
         enable_adaptive = self._enable_adaptive_fallback
+
+        area_mode = self.combo_processed_area.currentText() if hasattr(self, 'combo_processed_area') else 'Visible part'
+        if area_mode.startswith('Visible'):
+            try:
+                viewport_crop = self._compute_visible_crop_for_raster()
+                if viewport_crop is None:
+                    raise ValueError("Visible viewport crop unavailable")
+                x0, y0, x1, y1 = viewport_crop
+                from core.inference_engine import compute_visible_crop_region
+                crop_x, crop_y, crop_w, crop_h = compute_visible_crop_region(
+                    int(getattr(self.main_window.raster_loader, 'width', 0) or self.main_window.raster_loader.get_metadata()['width']),
+                    int(getattr(self.main_window.raster_loader, 'height', 0) or self.main_window.raster_loader.get_metadata()['height']),
+                    (x0, y0, x1, y1),
+                )
+                if crop_w > 0 and crop_h > 0:
+                    aoi_polygons_px = [[(crop_x, crop_y), (crop_x + crop_w, crop_y), (crop_x + crop_w, crop_y + crop_h), (crop_x, crop_y + crop_h), (crop_x, crop_y)]]
+                    self.append_log(f"Visible area crop applied: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}")
+            except Exception as exc:
+                self.logger.warning(f"Visible-area crop failed, falling back to full raster: {exc}")
+        elif area_mode.startswith('Entire'):
+            aoi_polygons_px = None
+        else:
+            if not aoi_polygons_px:
+                aoi_polygons_px = self._get_polygon_coords_by_ids(self._aoi_polygon_ids) or None
 
         out_dir = self.txt_output_dir.text().strip() or str(Path(raster_path).parent / "output") if raster_path else "output"
         out_name = self.txt_output_name.text().strip() or None
@@ -1053,6 +1132,45 @@ class InferencePanel(CollapsibleBox):
             )
         else:
             QMessageBox.information(self.main_window, "Export", "Exporting shapefiles...")
+
+    def import_inference_shapefile(self) -> None:
+        """Import a previous inference output SHP and render it back on the viewer."""
+        path, _ = QFileDialog.getOpenFileName(
+            self.main_window,
+            "Select inference result shapefile",
+            "",
+            "Shapefile (*.shp);;All Files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            raster_path = self._get_active_raster_path()
+            result = load_inference_result_from_shapefile(Path(path), raster_path=Path(raster_path) if raster_path else None)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.main_window,
+                "Import Failed",
+                f"Could not load the inference shapefile:\n{exc}",
+            )
+            return
+
+        if result is None or len(result.boxes) == 0:
+            QMessageBox.warning(
+                self.main_window,
+                "No Detections",
+                "The selected shapefile does not contain any inference detections.",
+            )
+            return
+
+        self._last_result = result
+        self.lbl_summary.setText(f"Imported: {len(result.boxes)} detections from {Path(path).name}")
+        self.btn_convert_to_centroids.setEnabled(len(result.boxes) > 0)
+
+        if hasattr(self.main_window, "handle_inference_finished"):
+            self.main_window.handle_inference_finished(result)
+        else:
+            QMessageBox.information(self.main_window, "Import Successful", f"Loaded {len(result.boxes)} detections from {Path(path).name}.")
 
     def _convert_to_centroids(self) -> None:
         """Convert bounding boxes from Multispectral Detector to centroid points."""
