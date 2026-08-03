@@ -703,7 +703,13 @@ class InferenceOverlayHandler(QObject):
                 correction_date=correction_date,
             )
 
-        excel_path = self._export_inference_excel(p_raster, out_dir, output_stem, active_box_records)
+        excel_path = self._export_inference_excel(
+            p_raster,
+            out_dir,
+            output_stem,
+            active_box_records,
+            fast_mode=True,
+        )
         geojson_path = self._export_inference_centroid_geojson(p_raster, out_dir, output_stem, active_box_records)
 
         summary = [f"1. Raw: {raw_shp.name}", f"2. Corrected: {corrected_shp.name}"]
@@ -813,13 +819,14 @@ class InferenceOverlayHandler(QObject):
             return None
 
     def _export_inference_excel(self, raster_path: Path, out_dir: Path, output_stem: str,
-                                records: List[Dict[str, Any]]) -> Optional[Path]:
-        """Export inference centroid summary to Excel with ID, Latitude, Longitude, Band 1..N."""
+                                records: List[Dict[str, Any]], fast_mode: bool = True) -> Optional[Path]:
+        """Export centroid metrics in the compact format: lat, lon, radius_m, diameter_m, area_m2."""
         if not records:
             return None
 
         try:
             from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         except ImportError:
             QMessageBox.warning(
                 self.main_window,
@@ -851,8 +858,6 @@ class InferenceOverlayHandler(QObject):
                 if transform is not None and crs is not None:
                     metrics = GeospatialMetrics(transform, crs)
 
-                band_count = src.count
-
                 for record in records:
                     x1, y1, x2, y2 = record.get('box', [0.0, 0.0, 0.0, 0.0])
                     cx = float((x1 + x2) / 2.0)
@@ -864,36 +869,69 @@ class InferenceOverlayHandler(QObject):
                         except Exception as e:
                             self.main_window.logger.debug(f"Excel export lat/lon conversion failed: {e}")
 
-                    row = [record.get('id', None), round(lat, 8), round(lon, 8)]
+                    radius_px = min(abs(x2 - x1), abs(y2 - y1)) / 2.0
+                    pixel_width_m = abs(float(transform.a)) if transform is not None else 1.0
+                    pixel_height_m = abs(float(transform.e)) if transform is not None else 1.0
+                    pixel_size_m = (pixel_width_m + pixel_height_m) / 2.0 if pixel_width_m and pixel_height_m else 1.0
+                    radius_m = radius_px * pixel_size_m
+                    diameter_m = radius_m * 2.0
+                    area_m2 = 3.141592653589793 * (radius_m ** 2)
 
-                    for band_index in range(1, band_count + 1):
-                        value = None
-                        try:
-                            value = _read_band_values_for_detection(
-                                src,
-                                band_index,
-                                (x1, y1, x2, y2),
-                                aoi_polygons_px=self._aoi_polygons_px,
-                                exclude_polygons_px=self._exclude_polygons_px,
-                            )
-                        except Exception as e:
-                            self.main_window.logger.debug(f"Failed to read band {band_index}: {e}")
-                        row.append(value)
-
-                    rows.append(row)
+                    rows.append([
+                        round(lat, 8),
+                        round(lon, 8),
+                        round(radius_m, 8),
+                        round(diameter_m, 8),
+                        round(area_m2, 8),
+                    ])
 
             if not rows:
                 return None
 
-            band_count = len(rows[0]) - 3
-            header = ["ID", "Latitude", "Longitude"] + [f"Band {i}" for i in range(1, band_count + 1)]
-
             wb = Workbook()
             ws = wb.active
             ws.title = "Inference Results"
-            ws.append(header)
+            headers = ["Latitude", "Longitude", "radius_m", "diameter_m", "area_m2"]
+            ws.append(headers)
             for row in rows:
                 ws.append(row)
+
+            header_fill = PatternFill("solid", fgColor="1F4E78")
+            coord_fill = PatternFill("solid", fgColor="D9EAF7")
+            radius_fill = PatternFill("solid", fgColor="E2F0D9")
+            diameter_fill = PatternFill("solid", fgColor="FFF2CC")
+            area_fill = PatternFill("solid", fgColor="FCE4D6")
+            header_font = Font(bold=True, color="FFFFFF")
+            thin = Side(style="thin", color="D9D9D9")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for cell in row:
+                    cell.border = border
+                    cell.alignment = Alignment(horizontal="center")
+
+            fills = [coord_fill, coord_fill, radius_fill, diameter_fill, area_fill]
+            for col_idx, fill in enumerate(fills, start=1):
+                for cell in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
+                    for c in cell:
+                        c.fill = fill
+
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for column_cells in ws.columns:
+                length = max(len(str(cell.value or "")) for cell in column_cells)
+                ws.column_dimensions[column_cells[0].column_letter].width = max(length + 2, 14)
+
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                for cell in row:
+                    if cell.column in [3, 4, 5]:
+                        cell.number_format = "0.#######"
 
             try:
                 wb.save(str(excel_path))

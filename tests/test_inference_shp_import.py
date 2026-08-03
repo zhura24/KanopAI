@@ -4,7 +4,12 @@ import numpy as np
 import rasterio
 import shapefile
 
-from core.inference_engine import load_inference_result_from_shapefile, compute_visible_crop_region
+from core.inference_engine import (
+    load_inference_result_from_shapefile,
+    compute_visible_crop_region,
+    export_result_excel,
+    auto_detect_band_mapping_multiref,
+)
 
 
 def test_compute_visible_crop_region_clamps_to_raster_bounds():
@@ -89,3 +94,80 @@ def test_load_inference_result_from_georeferenced_shape_uses_geometry_when_field
     assert result.boxes[0, 2] == 2.0
     assert result.boxes[0, 3] == 5.0
     assert result.class_names == ["palm"]
+
+
+def test_auto_detect_band_mapping_multiref_prefers_best_remaining_input(tmp_path):
+    raster_path = tmp_path / "demo_multiref.tif"
+    transform = rasterio.transform.from_origin(100.0, 200.0, 1.0, 1.0)
+    with rasterio.open(
+        raster_path,
+        "w",
+        driver="GTiff",
+        height=50,
+        width=50,
+        count=3,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=transform,
+    ) as dst:
+        band1 = np.full((50, 50), 10, dtype=np.float32)
+        band2 = np.full((50, 50), 20, dtype=np.float32)
+        band3 = np.full((50, 50), 30, dtype=np.float32)
+        dst.write(band1, 1)
+        dst.write(band2, 2)
+        dst.write(band3, 3)
+
+    band_stats = {
+        1: {"sources": {"ref_a": {"mean": 10.0, "p_low": 0, "p_high": 20}, "ref_b": {"mean": 60.0, "p_low": 0, "p_high": 20}}},
+        2: {"sources": {"ref_a": {"mean": 20.0, "p_low": 0, "p_high": 30}, "ref_b": {"mean": 5.0, "p_low": 0, "p_high": 30}}},
+        3: {"sources": {"ref_a": {"mean": 30.0, "p_low": 0, "p_high": 40}, "ref_b": {"mean": 40.0, "p_low": 0, "p_high": 40}}},
+    }
+
+    with rasterio.open(raster_path) as src:
+        mapping = auto_detect_band_mapping_multiref(src, band_stats)
+
+    assert mapping[1]["input_band"] == 1
+    assert mapping[2]["input_band"] == 2
+    assert mapping[3]["input_band"] == 3
+
+
+def test_export_result_excel_fast_mode_writes_centroid_metrics(tmp_path):
+    raster_path = tmp_path / "demo.tif"
+    transform = rasterio.transform.from_origin(100.0, 200.0, 1.0, 1.0)
+    with rasterio.open(
+        raster_path,
+        "w",
+        driver="GTiff",
+        height=10,
+        width=10,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=transform,
+    ) as dst:
+        dst.write(np.zeros((10, 10), dtype=np.uint8), 1)
+
+    out_path = tmp_path / "fast_export.xlsx"
+    result = export_result_excel(
+        str(raster_path),
+        str(out_path),
+        np.array([[0.0, 0.0, 2.0, 2.0]], dtype=np.float32),
+        np.array([0.92], dtype=np.float32),
+        np.array([0], dtype=np.int32),
+        class_names=["palm"],
+        fast_mode=True,
+    )
+
+    assert result is not None
+    assert out_path.exists()
+
+    from openpyxl import load_workbook
+    ws = load_workbook(out_path).active
+    assert ws[1][0].value == "Latitude"
+    assert ws[1][1].value == "Longitude"
+    assert ws[1][2].value == "radius_m"
+    assert ws[1][3].value == "diameter_m"
+    assert ws[1][4].value == "area_m2"
+    assert ws[2][2].value > 0
+    assert ws[2][3].value > 0
+    assert ws[2][4].value > 0

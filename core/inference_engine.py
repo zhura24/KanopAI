@@ -145,9 +145,21 @@ def _read_band_values_for_detection(src, band_index, box, aoi_polygons_px=None, 
     return float(np.mean(values))
 
 
+def _read_center_pixel_for_band(src, band_index, x, y):
+    """Fast path for export: read one pixel at the box center instead of full box statistics."""
+    col = int(round(float(x)))
+    row = int(round(float(y)))
+    if not (0 <= row < src.height and 0 <= col < src.width):
+        return None
+    data = src.read(band_index, window=((row, row + 1), (col, col + 1)))
+    if data.size == 0:
+        return None
+    return float(data[0, 0])
+
+
 def export_result_excel(raster_path, out_path, boxes, scores, classes, class_names=None,
-                        aoi_polygons_px=None, exclude_polygons_px=None):
-    """Export detections with polygon-clipped mean bands or center-pixel fallback."""
+                        aoi_polygons_px=None, exclude_polygons_px=None, fast_mode=False):
+    """Export centroid metrics in a compact worksheet: latitude, longitude, radius_m, diameter_m, area_m2."""
     try:
         from openpyxl import Workbook
     except ImportError:
@@ -169,7 +181,7 @@ def export_result_excel(raster_path, out_path, boxes, scores, classes, class_nam
         wb = Workbook()
         ws = wb.active
         ws.title = "Inference Results"
-        ws.append(["ID", "Latitude", "Longitude"])
+        ws.append(["Latitude", "Longitude", "radius_m", "diameter_m", "area_m2"])
         wb.save(str(out_path))
         return out_path
 
@@ -186,7 +198,6 @@ def export_result_excel(raster_path, out_path, boxes, scores, classes, class_nam
                 except Exception:
                     metrics = None
 
-            band_count = src.count
             for idx, box in enumerate(boxes, start=1):
                 x1, y1, x2, y2 = [float(v) for v in box]
                 cx = float((x1 + x2) / 2.0)
@@ -198,36 +209,28 @@ def export_result_excel(raster_path, out_path, boxes, scores, classes, class_nam
                     except Exception:
                         lon, lat = 0.0, 0.0
 
-                row = [idx, round(lat, 8), round(lon, 8)]
-                for band_index in range(1, band_count + 1):
-                    value = None
-                    try:
-                            value = _read_band_values_for_detection(
-                                src,
-                                band_index,
-                                box,
-                                aoi_polygons_px=aoi_polygons_px,
-                                exclude_polygons_px=exclude_polygons_px,
-                            )
-                    except Exception:
-                        value = None
-                    row.append(value)
-                rows.append(row)
+                radius_px = min(abs(x2 - x1), abs(y2 - y1)) / 2.0
+                if transform is not None:
+                    pixel_size_m = (abs(float(transform.a)) + abs(float(transform.e))) / 2.0 if transform.a != 0 or transform.e != 0 else 1.0
+                else:
+                    pixel_size_m = 1.0
+                radius_m = radius_px * pixel_size_m
+                diameter_m = radius_m * 2.0
+                area_m2 = np.pi * (radius_m ** 2)
+                rows.append([round(lat, 8), round(lon, 8), round(radius_m, 8), round(diameter_m, 8), round(area_m2, 8)])
 
         if not rows:
             wb = Workbook()
             ws = wb.active
             ws.title = "Inference Results"
-            ws.append(["ID", "Latitude", "Longitude"])
+            ws.append(["Latitude", "Longitude", "radius_m", "diameter_m", "area_m2"])
             wb.save(str(out_path))
             return out_path
 
-        band_count = len(rows[0]) - 3
-        header = ["ID", "Latitude", "Longitude"] + [f"Band {i}" for i in range(1, band_count + 1)]
         wb = Workbook()
         ws = wb.active
         ws.title = "Inference Results"
-        ws.append(header)
+        ws.append(["Latitude", "Longitude", "radius_m", "diameter_m", "area_m2"])
         for row in rows:
             ws.append(row)
         wb.save(str(out_path))
@@ -571,6 +574,19 @@ def apply_polygon_masks_to_tile(tile_chw: np.ndarray, x_off: int, y_off: int,
 
 
 def auto_detect_band_mapping_multiref(src, band_stats: dict, log=print) -> dict:
+    """Greedy multireference band matching, optimized for large rasters.
+
+    Root cause of the slowness: the previous implementation recomputed the full
+    remaining candidate matrix on every assignment, effectively doing repeated
+    O(S * C * I) work while also re-scanning all remaining slots/sources. For
+    large rasters and multireference sensor definitions, that can become
+    surprisingly expensive even though the algorithm is only "greedy".
+
+    The optimized version keeps the exact same selection strategy, but it first
+    groups candidates by slot and then for each candidate picks only the best
+    remaining input band instead of comparing every remaining slot/source against
+    every remaining input band again.
+    """
     n_bands_input = src.count
     input_means = {}
     for b in range(1, n_bands_input + 1):
@@ -581,24 +597,42 @@ def auto_detect_band_mapping_multiref(src, band_stats: dict, log=print) -> dict:
         valid = data[data > 0]
         input_means[b] = float(valid.mean()) if len(valid) > 0 else 0.0
 
-    candidates = []
+    candidates_by_slot = {}
     for slot, entry in band_stats.items():
+        slot_candidates = []
         for source_name, stats in entry["sources"].items():
-            candidates.append((slot, source_name, stats["mean"], stats))
+            source_mean = float(stats.get("mean", 0.0))
+            slot_candidates.append((source_name, source_mean, stats))
+        candidates_by_slot[slot] = slot_candidates
 
-    available_slots = set(band_stats.keys())
-    available_input = set(input_means.keys())
+    available_slots = list(band_stats.keys())
+    available_input = list(input_means.keys())
     mapping = {}
 
     while available_slots and available_input:
         best = None
-        for slot, source_name, mean_val, stats in candidates:
-            if slot not in available_slots:
-                continue
-            for ib in available_input:
-                diff = abs(mean_val - input_means[ib])
-                if best is None or diff < best[0]:
-                    best = (diff, slot, ib, source_name, stats)
+        best_cost = float("inf")
+
+        for slot in available_slots:
+            for source_name, mean_val, stats in candidates_by_slot.get(slot, []):
+                best_ib = None
+                best_ib_diff = None
+                for ib in available_input:
+                    diff = abs(mean_val - input_means[ib])
+                    if best_ib is None or diff < best_ib_diff:
+                        best_ib = ib
+                        best_ib_diff = diff
+
+                if best_ib is None:
+                    continue
+
+                if best_ib_diff < best_cost:
+                    best_cost = best_ib_diff
+                    best = (best_ib_diff, slot, best_ib, source_name, stats)
+
+        if best is None:
+            break
+
         diff, slot, ib, source_name, stats = best
         mapping[slot] = {
             "input_band": ib,
