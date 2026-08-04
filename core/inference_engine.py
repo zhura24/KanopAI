@@ -837,7 +837,22 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
 
     with rasterio.open(raster_path) as src:
         raster_transform = src.transform
-        crs_wkt = src.crs.to_wkt() if src.crs else None
+        if src.crs is not None:
+            crs_wkt = src.crs.to_wkt()
+            _crs_is_fallback = False
+        else:
+            # FALLBACK DARURAT: raster tidak memiliki CRS.
+            # File .prj ditulis dengan EPSG:4326 agar shapefile tetap bisa
+            # dibuka di QGIS/ArcGIS -- TAPI posisi spasialnya TIDAK BISA
+            # DIPERCAYA. Koordinat yang ditulis ke shapefile ini berasal
+            # dari transform raster yang tidak diketahui artinya (mungkin
+            # hanya koordinat piksel, mungkin meter lokal, bukan lat/lon).
+            # SOLUSI YANG BENAR: lakukan georeferencing raster input terlebih
+            # dahulu menggunakan QGIS (Layer > Georeferencer) atau gdalwarp
+            # sebelum menjalankan inference.
+            from rasterio.crs import CRS as _RasterioCRS
+            crs_wkt = _RasterioCRS.from_epsg(4326).to_wkt()
+            _crs_is_fallback = True
 
     with shapefile.Writer(str(out_shp), shapeType=shapefile.POLYGON) as shp:
         shp.field("id", "N", size=10)
@@ -867,11 +882,18 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
                        "not_corrected")
 
     # KNF-04: CRS harus konsisten dengan raster asal agar shapefile bisa
-    # langsung dibuka di QGIS/software GIS lain -- sebelumnya crs_wkt dibaca
-    # tapi tidak pernah ditulis ke .prj, jadi shapefile mentah kehilangan CRS.
+    # langsung dibuka di QGIS/software GIS lain.
     if crs_wkt:
         with open(out_shp.with_suffix(".prj"), "w") as prj:
             prj.write(crs_wkt)
+    if _crs_is_fallback:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"[PERINGATAN CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
+            f"Shapefile '{out_shp.name}' ditulis dengan fallback EPSG:4326 agar "
+            f"bisa dibuka di GIS, TAPI posisi koordinatnya salah/tidak dapat "
+            f"dipercaya. Lakukan georeferencing pada raster input terlebih dahulu."
+        )
 
 
 def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses,
@@ -893,7 +915,14 @@ def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses
 
     with rasterio.open(raster_path) as src:
         raster_transform = src.transform
-        crs_wkt = src.crs.to_wkt() if src.crs else None
+        if src.crs is not None:
+            crs_wkt = src.crs.to_wkt()
+            _crs_is_fallback = False
+        else:
+            # FALLBACK DARURAT: lihat penjelasan lengkap di save_shapefile().
+            from rasterio.crs import CRS as _RasterioCRS
+            crs_wkt = _RasterioCRS.from_epsg(4326).to_wkt()
+            _crs_is_fallback = True
 
     with shapefile.Writer(str(out_shp), shapeType=shapefile.POLYGON) as shp:
         shp.field("id", "N", size=10)
@@ -925,6 +954,14 @@ def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses
     if crs_wkt:
         with open(out_shp.with_suffix(".prj"), "w") as prj:
             prj.write(crs_wkt)
+    if _crs_is_fallback:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"[PERINGATAN CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
+            f"Shapefile '{out_shp.name}' ditulis dengan fallback EPSG:4326 agar "
+            f"bisa dibuka di GIS, TAPI posisi koordinatnya salah/tidak dapat "
+            f"dipercaya. Lakukan georeferencing pada raster input terlebih dahulu."
+        )
 
 
 def load_detection_from_shapefile(shp_path: Path):
