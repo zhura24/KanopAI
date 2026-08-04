@@ -60,6 +60,11 @@ build/nuitka/*.zip
 logs/
 *.log
 
+# Local databases (user data, shouldn't be versioned)
+*.db
+*.sqlite
+*.sqlite3
+
 # Data directories (large user data)
 /Data Baru
 /Raster Image

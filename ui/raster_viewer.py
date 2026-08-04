@@ -411,10 +411,10 @@ class RasterViewer(QGraphicsView):
             self.logger.debug(f"Failed to get wheel angle/pixel delta: {e}")
             a = 0
             p = 0
-        # Log at INFO temporarily so we can see wheel events in normal runs.
-        # This is diagnostic and can be reverted to debug later.
-        self.logger.info(f"[WHEEL EVENT RECEIVED] angleDelta={a}, pixelDelta={p}, current_zoom={self.zoom_factor:.2f}")
-        self.logger.debug(f"[WHEEL EVENT] Called: angleDelta={a}, pixelDelta={p}, current_zoom={self.zoom_factor:.2f}")
+        # PERF: dulu di-log INFO tiap wheel tick (komentar lama bilang "temporary,
+        # revert to debug later" tapi kelupaan). Sekarang debug aja + 1 baris
+        # (duplikatnya dihapus) -- tidak ada logic yang berubah.
+        self.logger.debug(f"[WHEEL EVENT] angleDelta={a}, pixelDelta={p}, current_zoom={self.zoom_factor:.2f}")
         # Mark user activity so we can throttle tile loads while user is
         # continuously interacting (e.g., spinning the touchpad/wheel).
         try:
@@ -462,7 +462,9 @@ class RasterViewer(QGraphicsView):
             self._update_render_hints()
             self.viewport_changed.emit()
 
-            self.logger.info(f"Zoom {direction}: {self.zoom_factor:.2f}x (factor: {zoom_factor:.2f})")
+            # PERF: sama seperti [WHEEL EVENT] di atas, ini jalan tiap wheel tick
+            # yang valid -- diturunkan ke debug biar gak spam I/O saat scroll aktif.
+            self.logger.debug(f"Zoom {direction}: {self.zoom_factor:.2f}x (factor: {zoom_factor:.2f})")
 
             if self.use_full_resolution:
                 self.is_zooming = True

@@ -69,6 +69,20 @@ class InferenceBoxItem(QGraphicsRectItem):
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setAcceptHoverEvents(True)
 
+        # PERF: handle resize (4x QGraphicsRectItem per box) SENGAJA tidak dibuat
+        # di sini lagi. Dulu selalu dibuat di depan meski setVisible(False) --
+        # untuk 5000 deteksi = 25.000 Qt item yang harus di-index scene sejak awal.
+        # Sekarang dibuat lazy, baru saat box pertama kali di-select (lihat
+        # apply_style()/_ensure_handles()). Behavior TIDAK berubah: handle memang
+        # cuma pernah kelihatan & bisa diklik saat box ter-select di mode edit,
+        # jadi menunda pembuatannya tidak menghilangkan interaksi apa pun.
+        self.handles = {}
+        self.apply_style()
+
+    def _ensure_handles(self) -> None:
+        """Buat 4 ResizeHandle sekali saja, on-demand, saat box pertama kali perlu tampilkan handle."""
+        if self.handles:
+            return
         self.handles = {
             'top_left': ResizeHandle('top_left', self),
             'top_right': ResizeHandle('top_right', self),
@@ -76,9 +90,10 @@ class InferenceBoxItem(QGraphicsRectItem):
             'bottom_right': ResizeHandle('bottom_right', self),
         }
         self.update_handle_positions()
-        self.apply_style()
 
     def update_handle_positions(self) -> None:
+        if not self.handles:
+            return
         r = self.rect()
         self.handles['top_left'].setPos(r.left(), r.top())
         self.handles['top_right'].setPos(r.right(), r.top())
@@ -113,6 +128,8 @@ class InferenceBoxItem(QGraphicsRectItem):
 
         is_edit_active = self.parent_handler and self.parent_handler.current_mode == "edit"
         show_handles = self.isSelected() and is_edit_active and self.status != "eliminated"
+        if show_handles and not self.handles:
+            self._ensure_handles()
         for h in self.handles.values():
             h.setVisible(show_handles)
 
