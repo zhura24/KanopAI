@@ -37,7 +37,8 @@ from handlers import (
     CentroidHandler,
     MeasurementHandler,
     ExportHandler,
-    ViewHandler
+    ViewHandler,
+    EHaraHandler
 )
 
 from ui.widgets.collapsible_box import CollapsibleBox
@@ -49,6 +50,7 @@ from ui.panels.export_panel import ExportPanel
 from ui.panels.detection_panel import DetectionPanel
 from ui.panels.centroid_panel import CentroidPanel
 from ui.panels.inference_panel import InferencePanel
+from ui.panels.ehara_panel import EHaraPanel
 
 
 from .mixins import (
@@ -373,6 +375,7 @@ class MainWindow(
         self.measurement_handler = MeasurementHandler(self)
         self.export_handler = ExportHandler(self)
         self.view_handler = ViewHandler(self)
+        self.ehara_handler = EHaraHandler(self)
         self.logger.info("Handlers initialized successfully")
 
         self._init_ui()
@@ -735,6 +738,9 @@ class MainWindow(
         self.centroid_panel = CentroidPanel(self)
         layout.addWidget(self.centroid_panel)
 
+        self.ehara_panel = EHaraPanel(self)
+        layout.addWidget(self.ehara_panel)
+
         self.input_sub = self.detection_panel.input_sub
         self.combo_processed_area = self.detection_panel.combo_processed_area
         self.model_sub = self.detection_panel.model_sub
@@ -777,6 +783,9 @@ class MainWindow(
         self.label_stats_total = self.centroid_panel.label_stats_total
         self.label_stats_avg = self.centroid_panel.label_stats_avg
         self.label_stats_density = self.centroid_panel.label_stats_density
+
+        self.spin_ehara_radius = self.ehara_panel.spin_ehara_radius
+        self.btn_run_ehara = self.ehara_panel.btn_run_ehara
 
         try:
             self.chk_qgis_preproc.toggled.connect(lambda v: self.logger.info(f"QGIS-like preprocessing set to {v}"))

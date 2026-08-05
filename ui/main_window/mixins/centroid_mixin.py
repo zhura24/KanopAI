@@ -171,6 +171,10 @@ class CentroidMixin:
     def save_centroids_to_shapefile(self):
         """Export centroids to shapefile - delegated to handler."""
         return self.centroid_handler.save_centroids_to_shapefile()
+
+    def run_ehara_extraction(self):
+        """Run eHara pixel extraction - delegated to handler."""
+        return self.ehara_handler.run_extraction()
     
     def generate_canopy_circles(self):
         """Generate canopy circles from detections - delegated to handler."""

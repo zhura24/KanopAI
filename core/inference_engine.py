@@ -1275,6 +1275,22 @@ def list_models_in_sqlite(db_path: Path) -> list:
         return []
 
 
+def delete_model_from_sqlite(db_path: Path, model_name: str) -> bool:
+    """Hapus model terdaftar dari database berdasarkan model_name.
+    Dipanggil GUI saat pengguna menghapus model dari daftar model tersimpan."""
+    try:
+        con = _ensure_db(Path(db_path))
+        cur = con.cursor()
+        cur.execute("DELETE FROM models WHERE model_name = ?", (model_name,))
+        deleted = cur.rowcount > 0
+        con.commit()
+        con.close()
+        return deleted
+    except Exception as e:
+        print(f"Gagal menghapus model dari database: {e}")
+        return False
+
+
 # ============================================================
 # ENGINE
 # ============================================================

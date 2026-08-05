@@ -5,6 +5,7 @@ from handlers.centroid_handler import CentroidHandler
 from handlers.measurement_handler import MeasurementHandler
 from handlers.export_handler import ExportHandler
 from handlers.view_handler import ViewHandler
+from handlers.ehara_handler import EHaraHandler
 
 __all__ = [
     'LayerHandler',
@@ -14,4 +15,5 @@ __all__ = [
     'MeasurementHandler',
     'ExportHandler',
     'ViewHandler',
+    'EHaraHandler',
 ]
