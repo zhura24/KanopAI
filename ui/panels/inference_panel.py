@@ -23,6 +23,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QCursor
 
 from ui.widgets.collapsible_box import CollapsibleBox
+from ui.widgets.flow_layout import FlowLayout
 from core.multispectral_worker import MultispectralInferenceWorker
 from core.inference_engine import (
     InferenceResult,
@@ -120,40 +121,48 @@ class InferencePanel(CollapsibleBox):
         model_layout = QVBoxLayout(model_group)
         model_layout.setSpacing(6)
 
-        btn_model_layout = QHBoxLayout()
-        btn_model_layout.setSpacing(4)
-
-        # SQLite model management
-        db_layout = QHBoxLayout()
-        db_layout.setSpacing(4)
-
+        # SQLite model management.
+        # The dropdown gets its own full-width row, and the three action
+        # buttons sit in a FlowLayout below so they always size to fit their
+        # own label text and wrap onto a new line instead of being squeezed
+        # (and clipped) into a single QHBoxLayout when the sidebar is narrow.
         self.combo_db_models = QComboBox()
         self.combo_db_models.setPlaceholderText("Load model from SQLite database...")
-        self.combo_db_models.setStyleSheet("QComboBox { font-size: 10px; background-color: #1e1e1e; color: #ccc; }")
-        db_layout.addWidget(self.combo_db_models, 3)
+        self.combo_db_models.setMinimumHeight(26)
+        self.combo_db_models.setStyleSheet("QComboBox { font-size: 10px; background-color: #1e1e1e; color: #ccc; padding: 2px 6px; }")
+        model_layout.addWidget(self.combo_db_models)
+
+        db_btn_container = QWidget()
+        db_btn_flow = FlowLayout(db_btn_container, margin=0, h_spacing=6, v_spacing=6)
+
+        btn_style_common = (
+            "QPushButton { font-size: 10px; padding: 5px 10px; }"
+        )
 
         self.btn_load_db_model = QPushButton("Load from DB")
         self.btn_load_db_model.setMinimumHeight(26)
+        self.btn_load_db_model.setStyleSheet(btn_style_common)
         self.btn_load_db_model.setToolTip("Load the selected model directly from the SQLite database for inference.")
         self.btn_load_db_model.clicked.connect(self._load_model_from_db)
-        db_layout.addWidget(self.btn_load_db_model)
+        db_btn_flow.addWidget(self.btn_load_db_model)
 
         self.btn_import_db_model = QPushButton("Import to DB")
         self.btn_import_db_model.setMinimumHeight(26)
+        self.btn_import_db_model.setStyleSheet(btn_style_common)
         self.btn_import_db_model.clicked.connect(self._import_model_to_db)
-        db_layout.addWidget(self.btn_import_db_model)
+        db_btn_flow.addWidget(self.btn_import_db_model)
 
         self.btn_delete_db_model = QPushButton("Delete from DB")
         self.btn_delete_db_model.setMinimumHeight(26)
         self.btn_delete_db_model.setToolTip("Permanently delete the selected model from the SQLite database.")
         self.btn_delete_db_model.setStyleSheet(
-            "QPushButton { background-color: #7f1d1d; color: white; } "
+            btn_style_common + " QPushButton { background-color: #7f1d1d; color: white; } "
             "QPushButton:hover { background-color: #991b1b; }"
         )
         self.btn_delete_db_model.clicked.connect(self._delete_model_from_db)
-        db_layout.addWidget(self.btn_delete_db_model)
+        db_btn_flow.addWidget(self.btn_delete_db_model)
 
-        model_layout.addLayout(db_layout)
+        model_layout.addWidget(db_btn_container)
 
         self.lbl_model_file = QLabel("Model: None selected")
         self.lbl_model_file.setWordWrap(True)

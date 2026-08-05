@@ -716,19 +716,17 @@ def validate_manual_band_mapping(manual_mapping: dict, band_stats: dict,
     (format sama persis dengan output auto_detect_band_mapping*, jadi tidak
     perlu ubah apa pun di logic pembacaan tile).
 
-    manual_mapping: dict {target_band(int): input_band(int)}.
-    Raise ValueError kalau ada slot training yang belum diisi pengguna, atau
-    band input yang ditunjuk di luar rentang band raster.
+    manual_mapping: dict {target_band(int): input_band(int) | None}.
+    Slot boleh sengaja dikosongkan (value None, atau key-nya tidak dikirim
+    sama sekali) -- ini dipakai kalau band raster input lebih sedikit dari
+    slot yang diharapkan model (mis. model 7 band tapi raster cuma 3 band):
+    4 slot sisanya dibiarkan blank dan channel-nya akan diisi nol di tile
+    (lihat _prepare_tile: band_mapping.get(target_b) is None -> dilewati).
+    Raise ValueError HANYA kalau band input yang ditunjuk di luar rentang
+    band raster (bukan lagi kalau ada slot yang kosong -- itu sekarang sah).
     """
-    expected_slots = set(band_stats.keys())
+    expected_slots = set(int(k) for k in band_stats.keys())
     given_slots = set(int(k) for k in manual_mapping.keys())
-
-    missing = expected_slots - given_slots
-    if missing:
-        raise ValueError(
-            f"Mapping manual belum lengkap -- slot band training berikut "
-            f"belum diisi: {sorted(missing)}"
-        )
 
     extra = given_slots - expected_slots
     if extra:
@@ -738,9 +736,21 @@ def validate_manual_band_mapping(manual_mapping: dict, band_stats: dict,
     multiref = is_multiref_schema(band_stats)
     normalized = {}
     used_inputs = {}
+    blank_slots = []
 
     for slot in expected_slots:
-        input_b = int(manual_mapping[slot])
+        raw = manual_mapping.get(slot)
+
+        if raw is None:
+            # Slot sengaja dikosongkan (blank) -- bukan error. Channel ini
+            # akan tetap nol di tile, model tetap jalan dengan slot lain
+            # yang terisi.
+            normalized[slot] = None
+            blank_slots.append(slot)
+            log(f"  -> Slot {slot} <- (blank, tidak dipetakan ke band manapun)")
+            continue
+
+        input_b = int(raw)
         if not (1 <= input_b <= n_bands_input):
             raise ValueError(
                 f"Slot {slot}: band input {input_b} di luar rentang "
@@ -766,6 +776,10 @@ def validate_manual_band_mapping(manual_mapping: dict, band_stats: dict,
             normalized[slot] = input_b
 
         log(f"  -> Slot {slot} <- band input {input_b} (manual, dari pengguna)")
+
+    if blank_slots:
+        log(f"[INFO] {len(blank_slots)} slot dibiarkan blank: {sorted(blank_slots)} "
+            f"-- channel-channel ini akan diisi nol di setiap tile.")
 
     dup = {b: slots for b, slots in used_inputs.items() if len(slots) > 1}
     if dup:

@@ -89,12 +89,14 @@ def assess_band_mismatch(
 class ManualBandMappingDialog(QDialog):
     """Manual mapping dialog: model slot → raster band."""
 
+    BLANK_LABEL = "-- Blank (no band / leave empty) --"
+
     def __init__(
         self,
         parent: Any,
         band_stats: dict,
         n_bands: int,
-        initial_mapping: Optional[Dict[int, int]] = None,
+        initial_mapping: Optional[Dict[int, Optional[int]]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manual Band Matching")
@@ -102,15 +104,29 @@ class ManualBandMappingDialog(QDialog):
         self._band_stats = band_stats
         self._n_bands = n_bands
         self._combos: Dict[int, QComboBox] = {}
-        self.result_mapping: Optional[Dict[int, int]] = None
+        self.result_mapping: Optional[Dict[int, Optional[int]]] = None
 
         layout = QVBoxLayout(self)
         info = QLabel(
             "Map each model band slot to an input raster band.\n"
-            "Ensure the pairing matches the sensor used during training."
+            "Ensure the pairing matches the sensor used during training.\n"
+            "If the input raster has fewer bands than the model expects, "
+            "leave the extra slots as \"Blank\" — those channels are simply "
+            "left empty (zero) during inference instead of being forced "
+            "onto the wrong band."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
+
+        if n_bands < len(band_stats):
+            hint = QLabel(
+                f"Input raster only has {n_bands} band(s), while the model "
+                f"expects {len(band_stats)} slot(s). "
+                f"{len(band_stats) - n_bands} slot(s) will need to stay Blank."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("QLabel { color: #f59e0b; font-size: 10px; }")
+            layout.addWidget(hint)
 
         form_group = QGroupBox("Band Mapping")
         form = QFormLayout(form_group)
@@ -120,14 +136,24 @@ class ManualBandMappingDialog(QDialog):
             combo = QComboBox()
             for b in range(1, n_bands + 1):
                 combo.addItem(f"Band {b}", b)
+            # Blank option always available, regardless of n_bands, so the
+            # user can intentionally skip a slot even when there'd otherwise
+            # be a matching band available.
+            combo.addItem(self.BLANK_LABEL, None)
+
             if initial_mapping and slot in initial_mapping:
-                idx = combo.findData(initial_mapping[slot])
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
+                mapped_value = initial_mapping[slot]
+                idx = combo.findData(mapped_value)
+                combo.setCurrentIndex(idx if idx >= 0 else combo.count() - 1)
             elif slot <= n_bands:
+                # Default: 1-to-1 guess for slots that have a corresponding
+                # raster band.
                 combo.setCurrentIndex(slot - 1)
-            elif n_bands > 0:
-                combo.setCurrentIndex(n_bands - 1)
+            else:
+                # No raster band exists for this slot -- default to Blank
+                # instead of silently reusing the last available band.
+                combo.setCurrentIndex(combo.count() - 1)
+
             self._combos[slot] = combo
             form.addRow(f"Model Slot {slot}:", combo)
 
@@ -144,9 +170,10 @@ class ManualBandMappingDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _accept_mapping(self) -> None:
-        mapping: Dict[int, int] = {}
+        mapping: Dict[int, Optional[int]] = {}
         for slot, combo in self._combos.items():
-            mapping[slot] = int(combo.currentData())
+            data = combo.currentData()
+            mapping[slot] = int(data) if data is not None else None
         self.result_mapping = mapping
         self.accept()
 
