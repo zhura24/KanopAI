@@ -4,7 +4,7 @@
 ;   ISCC.exe KanopiAI.iss
 
 #define MyAppName "KanopiAI"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.2.3"
 #define MyAppPublisher "KanopiAI"
 #define MyAppExeName "KanopiAI.exe"
 #define PyInstallerDist "dist\KanopiAI"

@@ -850,23 +850,39 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
     import shapefile  # pyshp
 
     with rasterio.open(raster_path) as src:
-        raster_transform = src.transform
         if src.crs is not None:
+            raster_transform = src.transform
             crs_wkt = src.crs.to_wkt()
-            _crs_is_fallback = False
+            _no_crs = False
         else:
-            # FALLBACK DARURAT: raster tidak memiliki CRS.
-            # File .prj ditulis dengan EPSG:4326 agar shapefile tetap bisa
-            # dibuka di QGIS/ArcGIS -- TAPI posisi spasialnya TIDAK BISA
-            # DIPERCAYA. Koordinat yang ditulis ke shapefile ini berasal
-            # dari transform raster yang tidak diketahui artinya (mungkin
-            # hanya koordinat piksel, mungkin meter lokal, bukan lat/lon).
-            # SOLUSI YANG BENAR: lakukan georeferencing raster input terlebih
-            # dahulu menggunakan QGIS (Layer > Georeferencer) atau gdalwarp
-            # sebelum menjalankan inference.
-            from rasterio.crs import CRS as _RasterioCRS
-            crs_wkt = _RasterioCRS.from_epsg(4326).to_wkt()
-            _crs_is_fallback = True
+            # Raster tidak punya CRS (mis. .jpg/.png langsung dari kamera,
+            # tanpa georeferencing -- kasus yang memang didukung aplikasi).
+            #
+            # rasterio/GDAL memberi transform identity untuk raster begini:
+            # baris ke-N -> y = +N (Y makin BESAR ke bawah). Tapi QGIS
+            # menampilkan raster tanpa CRS dengan konvensi "north-up"
+            # standar: baris 0 (atas gambar) = y=0, baris paling bawah =
+            # y=-height (Y makin NEGATIF ke bawah). Kalau box ditulis pakai
+            # transform identity rasterio, tanda Y-nya kebalik dari yang
+            # dipakai QGIS buat render raster yang sama persis -- box jadi
+            # muncul di sisi Y positif sementara rasternya sendiri ada di
+            # sisi Y negatif, sama sekali tidak overlay walau raster &
+            # shapefile berasal dari raster yang sama.
+            #
+            # Transform di bawah ini (e=-1, f=0) meniru persis konvensi
+            # QGIS itu supaya box selalu overlay pixel-ke-pixel dengan
+            # benar di atas rasternya, walau tanpa CRS/tanpa .prj.
+            raster_transform = rasterio.Affine(1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+            crs_wkt = None
+            _no_crs = True
+            #
+            # SOAL .prj: shapefile ini sengaja TIDAK diberi .prj sama sekali
+            # kalau raster tidak punya CRS (lihat penulisan .prj di bawah).
+            # QGIS akan memperlakukan raster & shapefile sama-sama sebagai
+            # "unknown CRS" dan menampilkan keduanya di ruang koordinat yang
+            # sama apa adanya. Ini bukan koordinat geografis dunia nyata --
+            # kalau butuh itu, raster input tetap perlu digeoreferensi dulu
+            # (QGIS Georeferencer / gdalwarp) sebelum inference.
 
     with shapefile.Writer(str(out_shp), shapeType=shapefile.POLYGON) as shp:
         shp.field("id", "N", size=10)
@@ -896,17 +912,20 @@ def save_shapefile(raster_path: Path, boxes, scores, classes, out_shp: Path, mod
                        "not_corrected")
 
     # KNF-04: CRS harus konsisten dengan raster asal agar shapefile bisa
-    # langsung dibuka di QGIS/software GIS lain.
+    # langsung dibuka di QGIS/software GIS lain. Kalau raster tidak punya
+    # CRS, sengaja TIDAK menulis .prj (lihat penjelasan di atas) supaya
+    # overlay pixel-ke-pixel dengan raster tetap benar.
     if crs_wkt:
         with open(out_shp.with_suffix(".prj"), "w") as prj:
             prj.write(crs_wkt)
-    if _crs_is_fallback:
+    if _no_crs:
         import logging as _logging
-        _logging.getLogger(__name__).warning(
-            f"[PERINGATAN CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
-            f"Shapefile '{out_shp.name}' ditulis dengan fallback EPSG:4326 agar "
-            f"bisa dibuka di GIS, TAPI posisi koordinatnya salah/tidak dapat "
-            f"dipercaya. Lakukan georeferencing pada raster input terlebih dahulu."
+        _logging.getLogger(__name__).info(
+            f"[INFO CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
+            f"Shapefile '{out_shp.name}' ditulis TANPA file .prj (bukan "
+            f"fallback EPSG:4326) supaya tetap overlay pixel-ke-pixel dengan "
+            f"raster sumbernya di QGIS. Ini bukan koordinat geografis asli -- "
+            f"lakukan georeferencing pada raster input jika butuh itu."
         )
 
 
@@ -928,15 +947,18 @@ def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses
     from datetime import datetime
 
     with rasterio.open(raster_path) as src:
-        raster_transform = src.transform
         if src.crs is not None:
+            raster_transform = src.transform
             crs_wkt = src.crs.to_wkt()
-            _crs_is_fallback = False
+            _no_crs = False
         else:
-            # FALLBACK DARURAT: lihat penjelasan lengkap di save_shapefile().
-            from rasterio.crs import CRS as _RasterioCRS
-            crs_wkt = _RasterioCRS.from_epsg(4326).to_wkt()
-            _crs_is_fallback = True
+            # Raster tidak punya CRS -- lihat penjelasan lengkap di
+            # save_shapefile() soal kenapa transform-nya perlu di-flip
+            # (e=-1, f=0) supaya cocok sama konvensi rendering QGIS untuk
+            # raster tanpa CRS, dan kenapa .prj sengaja tidak ditulis.
+            raster_transform = rasterio.Affine(1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+            crs_wkt = None
+            _no_crs = True
 
     with shapefile.Writer(str(out_shp), shapeType=shapefile.POLYGON) as shp:
         shp.field("id", "N", size=10)
@@ -968,13 +990,12 @@ def save_corrected_shapefile(raster_path: Path, boxes, scores, classes, statuses
     if crs_wkt:
         with open(out_shp.with_suffix(".prj"), "w") as prj:
             prj.write(crs_wkt)
-    if _crs_is_fallback:
+    if _no_crs:
         import logging as _logging
-        _logging.getLogger(__name__).warning(
-            f"[PERINGATAN CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
-            f"Shapefile '{out_shp.name}' ditulis dengan fallback EPSG:4326 agar "
-            f"bisa dibuka di GIS, TAPI posisi koordinatnya salah/tidak dapat "
-            f"dipercaya. Lakukan georeferencing pada raster input terlebih dahulu."
+        _logging.getLogger(__name__).info(
+            f"[INFO CRS] Raster '{raster_path.name}' tidak memiliki CRS. "
+            f"Shapefile '{out_shp.name}' ditulis TANPA file .prj supaya tetap "
+            f"overlay pixel-ke-pixel dengan raster sumbernya di QGIS."
         )
 
 

@@ -143,7 +143,7 @@ def test_export_result_excel_fast_mode_writes_centroid_metrics(tmp_path):
         count=1,
         dtype="uint8",
         crs="EPSG:4326",
-        transform=transform,
+        transform=transform, 
     ) as dst:
         dst.write(np.zeros((10, 10), dtype=np.uint8), 1)
 
