@@ -1,5 +1,6 @@
 """Handler for the eHara feature: raster pixel value extraction (mean per
-band) around the center point of the bounding box / detection point.
+band) around the center point of the bounding box / detection point, plus
+NDVI/GNDVI/SR calculation and optional N/P/K/Mg leaf nutrient prediction.
 
 Flow:
 1. Check whether there is an active raster (to extract values from).
@@ -12,7 +13,14 @@ Flow:
    the user specified.
 4. For each raster band, compute the mean pixel value inside each square
    polygon (nodata is ignored).
-5. Save the result to the Excel (.xlsx) file chosen by the user; if the
+5. Using the three band indices chosen by the user (Band 1/2/3, mapped to
+   NDVI/GNDVI/SR formulas — see core.hara_regression), compute NDVI, GNDVI
+   and SR for each point.
+6. If the user has loaded a training Excel dataset (historical ground
+   truth: ID, X, Y, N, P, K, Mg, band1, band2, band3, NDVI, GNDVI, SR), fit
+   a PCA + Linear Regression calibration on the fly and predict N/P/K/Mg
+   leaf nutrient content for each extracted point.
+7. Save the result to the Excel (.xlsx) file chosen by the user; if the
    file already exists it will be overwritten directly (Qt's built-in save
    dialog already asks for overwrite confirmation).
 """
@@ -67,6 +75,11 @@ class EHaraHandler:
         from rasterio.mask import mask
         import pandas as pd
 
+        from core.hara_regression import (
+            calculate_ndvi, calculate_gndvi, calculate_sr,
+            load_training_data, HaraRegressionModel, HaraRegressionError,
+        )
+
         # 1. Check for an active raster
         dataset = self._get_active_dataset()
         if dataset is None:
@@ -88,11 +101,36 @@ class EHaraHandler:
             )
             return
 
-        # 3. Get the buffer radius from the panel (default 2.0 m)
+        # 3. Get the buffer radius + band indices + training data from the panel
         radius = 2.0
+        band1_idx, band2_idx, band3_idx = 1, 2, 3
+        training_data_path = None
         panel = getattr(self.main_window, "ehara_panel", None)
-        if panel is not None and hasattr(panel, "spin_ehara_radius"):
-            radius = panel.spin_ehara_radius.value()
+        if panel is not None:
+            if hasattr(panel, "spin_ehara_radius"):
+                radius = panel.spin_ehara_radius.value()
+            if hasattr(panel, "spin_ehara_band1"):
+                band1_idx = panel.spin_ehara_band1.value()
+            if hasattr(panel, "spin_ehara_band2"):
+                band2_idx = panel.spin_ehara_band2.value()
+            if hasattr(panel, "spin_ehara_band3"):
+                band3_idx = panel.spin_ehara_band3.value()
+            training_data_path = getattr(panel, "training_data_path", None)
+
+        band_count = dataset.count
+
+        # Validate the chosen band indices against the actual raster before
+        # doing any work.
+        for label, idx in (("Band 1", band1_idx), ("Band 2", band2_idx), ("Band 3", band3_idx)):
+            if idx < 1 or idx > band_count:
+                QMessageBox.warning(
+                    self.main_window,
+                    "Invalid Band Index",
+                    f"{label} index ({idx}) is out of range for this raster, "
+                    f"which has {band_count} band(s). Please adjust the band "
+                    "index in the eHara panel."
+                )
+                return
 
         # Warn if the raster CRS is geographic (degrees), the radius in meters won't be valid
         try:
@@ -113,11 +151,40 @@ class EHaraHandler:
         except Exception as e:
             self.logger.debug(f"Failed to check CRS type: {e}")
 
+        # 4. If training data was provided, load + validate it up-front so
+        # we fail fast before doing the (potentially slow) per-band
+        # extraction below.
+        hara_model = None
+        if training_data_path:
+            try:
+                training_df = load_training_data(training_data_path)
+                dropped = training_df.attrs.get("rows_dropped", 0)
+                if dropped:
+                    self.logger.warning(
+                        f"eHara training data: dropped {dropped} row(s) with "
+                        "missing/non-numeric values."
+                    )
+                hara_model = HaraRegressionModel(training_df)
+            except HaraRegressionError as e:
+                QMessageBox.critical(
+                    self.main_window, "Training Data Error",
+                    f"Could not use the loaded training data:\n{e}\n\n"
+                    "Extraction will continue without N/P/K/Mg prediction."
+                )
+                hara_model = None
+            except Exception as e:
+                self.logger.error(f"Failed to fit eHara regression model: {e}", exc_info=True)
+                QMessageBox.critical(
+                    self.main_window, "Training Data Error",
+                    f"Unexpected error while fitting the nutrient regression model:\n{e}\n\n"
+                    "Extraction will continue without N/P/K/Mg prediction."
+                )
+                hara_model = None
+
         transform = dataset.transform
-        band_count = dataset.count
         nodata_value = dataset.nodata if dataset.nodata is not None else -9999
 
-        # 4. Build a square polygon for each box (from the bbox center point)
+        # 5. Build a square polygon for each box (from the bbox center point)
         ids = []
         eastings = []
         northings = []
@@ -150,7 +217,7 @@ class EHaraHandler:
             northings.append(gy)
             polygons.append(polygon)
 
-        # 5. Progress dialog since the per-band process can take a while
+        # 6. Progress dialog since the per-band process can take a while
         progress = QProgressDialog(
             "Extracting pixel values...", "Cancel", 0, band_count, self.main_window
         )
@@ -204,7 +271,34 @@ class EHaraHandler:
 
         df_result = pd.DataFrame(result_data)
 
-        # 6. Choose save location (overwrite if the file already exists)
+        # 7. Compute NDVI/GNDVI/SR from the user-chosen band1/band2/band3
+        df_result["band1"] = df_result[f"Band_{band1_idx}_mean"]
+        df_result["band2"] = df_result[f"Band_{band2_idx}_mean"]
+        df_result["band3"] = df_result[f"Band_{band3_idx}_mean"]
+        df_result["NDVI"] = calculate_ndvi(df_result["band1"], df_result["band3"])
+        df_result["GNDVI"] = calculate_gndvi(df_result["band2"], df_result["band3"])
+        df_result["SR"] = calculate_sr(df_result["band1"], df_result["band3"])
+
+        # 8. Optional N/P/K/Mg nutrient prediction
+        if hara_model is not None:
+            try:
+                nutrient_df = hara_model.predict(df_result)
+                df_result = pd.concat([df_result, nutrient_df], axis=1)
+            except HaraRegressionError as e:
+                QMessageBox.warning(
+                    self.main_window, "Nutrient Prediction Skipped",
+                    f"Could not predict N/P/K/Mg for the extracted points:\n{e}\n\n"
+                    "The Excel file will still be saved without those columns."
+                )
+            except Exception as e:
+                self.logger.error(f"eHara nutrient prediction failed: {e}", exc_info=True)
+                QMessageBox.warning(
+                    self.main_window, "Nutrient Prediction Skipped",
+                    f"Unexpected error while predicting N/P/K/Mg:\n{e}\n\n"
+                    "The Excel file will still be saved without those columns."
+                )
+
+        # 9. Choose save location (overwrite if the file already exists)
         output_path, _ = QFileDialog.getSaveFileName(
             self.main_window,
             "Save eHara Extraction Result",
@@ -226,15 +320,17 @@ class EHaraHandler:
             return
 
         elapsed = datetime.datetime.now() - start_time
+        nutrient_note = " with N/P/K/Mg prediction" if hara_model is not None and \
+            any(c.endswith("Leaf (%)") for c in df_result.columns) else ""
         self.logger.info(
-            f"eHara extraction complete | {len(polygons)} points | {band_count} bands | "
-            f"Saved to {output_path} | Time: {elapsed}"
+            f"eHara extraction complete{nutrient_note} | {len(polygons)} points | "
+            f"{band_count} bands | Saved to {output_path} | Time: {elapsed}"
         )
 
         QMessageBox.information(
             self.main_window,
             "Extraction Complete",
-            f"eHara pixel extraction complete.\n\n"
+            f"eHara pixel extraction complete{nutrient_note}.\n\n"
             f"Points processed: {len(polygons)}\n"
             f"Bands: {band_count}\n"
             f"Saved to:\n{output_path}\n\n"

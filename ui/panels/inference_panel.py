@@ -596,7 +596,29 @@ class InferencePanel(CollapsibleBox):
             self.logger.debug(f"Failed to list DB models: {e}")
 
     def _import_model_to_db(self) -> None:
-        if not self.model_path or not self.band_stats_path:
+        if self.model_path and self.band_stats_path:
+            # A model is already loaded (e.g. for running inference). Don't
+            # silently reuse it — ask the user explicitly whether they want
+            # to import that same model or pick a different .pt file.
+            box = QMessageBox(self.main_window)
+            box.setWindowTitle("Import Model to Database")
+            box.setText(
+                f"A model is currently loaded:\n{Path(self.model_path).name}\n\n"
+                "Import this loaded model, or choose a different .pt file to import?"
+            )
+            btn_use_loaded = box.addButton("Use Loaded Model", QMessageBox.ButtonRole.AcceptRole)
+            btn_choose_new = box.addButton("Choose New File...", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_choose_new)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_use_loaded:
+                pass  # keep self.model_path / self.band_stats_path as-is
+            elif clicked is btn_choose_new:
+                self._browse_model()
+            else:
+                return  # Cancel
+        else:
             self._browse_model()
 
         if not self.model_path or not self.band_stats_path:
