@@ -1,4 +1,4 @@
-"""Panel untuk fitur eHara: ekstraksi nilai piksel raster per band."""
+"""Panel for the eHara feature: raster pixel value extraction per band."""
 
 import logging
 from PyQt6.QtWidgets import (
@@ -9,11 +9,11 @@ from ui.widgets.collapsible_box import CollapsibleBox
 
 
 class EHaraPanel(CollapsibleBox):
-    """Panel untuk ekstraksi nilai piksel raster (mean per band) di sekitar
-    titik pusat bounding box / hasil deteksi yang sedang ditampilkan."""
+    """Panel for extracting raster pixel values (mean per band) around the
+    center point of the bounding box / detection result currently shown."""
 
     def __init__(self, main_window):
-        super().__init__("eHara - Ekstraksi Piksel")
+        super().__init__("eHara - Pixel Extraction")
         self.main_window = main_window
         self.logger = logging.getLogger(__name__)
         self.init_ui()
@@ -24,8 +24,8 @@ class EHaraPanel(CollapsibleBox):
         layout.setSpacing(8)
 
         info_label = QLabel(
-            "Ekstrak nilai rata-rata piksel tiap band di sekitar titik pusat "
-            "bounding box/hasil deteksi yang sedang ditampilkan."
+            "Extract the average pixel value of each band around the center "
+            "point of the bounding box/detection result currently shown."
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("QLabel { color: #888; font-size: 10px; padding: 4px; }")
@@ -41,11 +41,11 @@ class EHaraPanel(CollapsibleBox):
         self.spin_ehara_radius.setSingleStep(0.5)
         self.spin_ehara_radius.setValue(2.0)
         self.spin_ehara_radius.setSuffix(" m")
-        form.addRow("Radius Buffer:", self.spin_ehara_radius)
+        form.addRow("Buffer Radius:", self.spin_ehara_radius)
 
         layout.addLayout(form)
 
-        self.btn_run_ehara = QPushButton("Ekstrak Piksel (eHara)")
+        self.btn_run_ehara = QPushButton("Extract Pixels (eHara)")
         self.btn_run_ehara.setMinimumHeight(32)
         self.btn_run_ehara.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_run_ehara.clicked.connect(self.main_window.run_ehara_extraction)

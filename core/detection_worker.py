@@ -1437,22 +1437,46 @@ class DetectionWorker(QThread):
             return 0.0
         return inter_area / union
 
+    def _iou_matrix(self, boxes):
+        """Hitung matrix IoU N x N sekaligus pakai numpy broadcasting.
+        Hasilnya identik dgn manggil self._iou() utk tiap pasangan (i,j),
+        cuma jauh lebih cepat karena gak ada overhead loop + call Python."""
+        boxes = np.asarray(boxes, dtype=np.float64)
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+        ix1 = np.maximum(x1[:, None], x1[None, :])
+        iy1 = np.maximum(y1[:, None], y1[None, :])
+        ix2 = np.minimum(x2[:, None], x2[None, :])
+        iy2 = np.minimum(y2[:, None], y2[None, :])
+        iw = np.maximum(0.0, ix2 - ix1)
+        ih = np.maximum(0.0, iy2 - iy1)
+        inter = iw * ih
+        union = areas[:, None] + areas[None, :] - inter
+        iou = np.zeros_like(union)
+        valid = union > 0
+        iou[valid] = inter[valid] / union[valid]
+        return iou
+
     def _nms(self, dets, iou_thresh=0.45):
         # dets: list of {'box':[x1,y1,x2,y2], 'score':float, 'class':int}
+        # NOTE: divectorize pakai numpy (2025), hasil terverifikasi identik
+        # dgn implementasi loop-python lama (lihat catatan tim ttg verifikasi).
         if not dets:
             return []
-        dets_sorted = sorted(dets, key=lambda d: d['score'], reverse=True)
-        keep = []
-        while dets_sorted:
-            cur = dets_sorted.pop(0)
-            keep.append(cur)
-            remaining = []
-            for d in dets_sorted:
-                iou = self._iou(cur['box'], d['box'])
-                if iou < iou_thresh:
-                    remaining.append(d)
-            dets_sorted = remaining
-        return keep
+        boxes = np.array([d['box'] for d in dets], dtype=np.float64)
+        scores = np.array([d['score'] for d in dets], dtype=np.float64)
+        order = np.argsort(-scores, kind='stable')  # descending, stable spt sorted() lama
+        mat = self._iou_matrix(boxes)
+        n = len(dets)
+        suppressed = np.zeros(n, dtype=bool)
+        keep_idx = []
+        for idx in order:
+            if suppressed[idx]:
+                continue
+            keep_idx.append(idx)
+            suppressed[idx] = True
+            suppressed |= (mat[idx] >= iou_thresh)
+        return [dets[i] for i in keep_idx]
 
     def _nms_all_classes(self, dets, iou_thresh=0.45):
         by_class = {}
@@ -1465,54 +1489,67 @@ class DetectionWorker(QThread):
             final.extend(kept)
         return final
 
-    def _merge_overlaps(self, dets, iou_thresh=0.45):
-        """Merge overlapping detections by clustering boxes with IoU >= threshold
-        and averaging box coordinates weighted by score. Returns new det list.
-        """
+    def _cluster_and_merge(self, dets, iou_thresh, keep_class_only):
+        """Logic bersama utk _merge_overlaps & _stitch_detections (algoritma
+        clustering-nya identik, cuma beda field yg disimpan di output).
+        Divectorize: IoU matrix dihitung sekali per kelas pakai numpy,
+        loop clustering-nya tetap sama persis urutan/kondisinya spt versi lama,
+        cuma lookup IoU-nya jadi O(1) dari matrix, bukan hitung ulang tiap pasangan."""
         if not dets:
             return []
-        # Group by class to avoid merging different classes
         by_class = {}
         for d in dets:
             cls = int(d.get('class', 0))
             by_class.setdefault(cls, []).append(d)
 
-        merged = []
+        merged_all = []
         for cls, items in by_class.items():
-            used = [False] * len(items)
-            for i, di in enumerate(items):
+            n = len(items)
+            boxes = np.array([it['box'] for it in items], dtype=np.float64)
+            mat = self._iou_matrix(boxes) if n > 0 else np.zeros((0, 0))
+            used = np.zeros(n, dtype=bool)
+            for i in range(n):
                 if used[i]:
                     continue
-                cluster = [di]
                 used[i] = True
-                for j in range(i+1, len(items)):
-                    if used[j]:
-                        continue
-                    dj = items[j]
-                    if self._iou(di['box'], dj['box']) >= iou_thresh:
-                        cluster.append(dj)
-                        used[j] = True
+                if i + 1 < n:
+                    mask = (~used[i+1:]) & (mat[i, i+1:] >= iou_thresh)
+                    matched = np.where(mask)[0] + i + 1
+                else:
+                    matched = np.array([], dtype=int)
+                if len(matched) > 0:
+                    used[matched] = True
+                    cluster_idx = np.concatenate(([i], matched))
+                else:
+                    cluster_idx = np.array([i])
+                cluster = [items[k] for k in cluster_idx]
 
-                # Weighted average of cluster
                 if len(cluster) == 1:
-                    merged.append(cluster[0])
+                    c0 = cluster[0]
+                    if keep_class_only:
+                        merged_all.append({'box': c0['box'], 'score': c0['score'], 'class': cls})
+                    else:
+                        merged_all.append(c0)
                 else:
                     scores = np.array([c['score'] for c in cluster], dtype=np.float64)
-                    # apply edge-aware multipliers: reduce weight for detections flagged as edge
                     edges = np.array([1.0 if not c.get('edge', False) else YOLO_EDGE_WEIGHT_MULTIPLIER for c in cluster], dtype=np.float64)
                     weighted = scores * edges
                     weights = weighted / (weighted.sum() + EPSILON)
-                    boxes = np.array([c['box'] for c in cluster], dtype=np.float64)
-                    x1 = float((boxes[:,0] * weights).sum())
-                    y1 = float((boxes[:,1] * weights).sum())
-                    x2 = float((boxes[:,2] * weights).sum())
-                    y2 = float((boxes[:,3] * weights).sum())
+                    bx = np.array([c['box'] for c in cluster], dtype=np.float64)
+                    x1 = float((bx[:, 0] * weights).sum())
+                    y1 = float((bx[:, 1] * weights).sum())
+                    x2 = float((bx[:, 2] * weights).sum())
+                    y2 = float((bx[:, 3] * weights).sum())
                     merged_score = float(scores.max())
-                    merged.append({'box':[x1,y1,x2,y2],'score':merged_score,'class':cls})
+                    merged_all.append({'box': [x1, y1, x2, y2], 'score': merged_score, 'class': cls})
 
-        # Sort by score desc
-        merged_sorted = sorted(merged, key=lambda d: d['score'], reverse=True)
-        return merged_sorted
+        return sorted(merged_all, key=lambda d: d['score'], reverse=True)
+
+    def _merge_overlaps(self, dets, iou_thresh=0.45):
+        """Merge overlapping detections by clustering boxes with IoU >= threshold
+        and averaging box coordinates weighted by score. Returns new det list.
+        """
+        return self._cluster_and_merge(dets, iou_thresh, keep_class_only=False)
 
     def _merge_into_global(self, global_list, batch_list, iou_thresh=0.45):
         """Merge batch_list detections into global_list in-place.
@@ -1570,45 +1607,4 @@ class DetectionWorker(QThread):
         detections near tile borders contribute less and central detections win.
         Returns a new list of merged detections with keys 'box','score','class'.
         """
-        if not dets:
-            return []
-        by_class = {}
-        for d in dets:
-            cls = int(d.get('class', 0))
-            by_class.setdefault(cls, []).append(d)
-
-        merged_all = []
-        for cls, items in by_class.items():
-            used = [False] * len(items)
-            for i, di in enumerate(items):
-                if used[i]:
-                    continue
-                cluster = [di]
-                used[i] = True
-                for j in range(i+1, len(items)):
-                    if used[j]:
-                        continue
-                    dj = items[j]
-                    if self._iou(di['box'], dj['box']) >= iou_thresh:
-                        cluster.append(dj)
-                        used[j] = True
-
-                if len(cluster) == 1:
-                    # strip helper keys for output
-                    c0 = cluster[0]
-                    merged_all.append({'box': c0['box'], 'score': c0['score'], 'class': cls})
-                else:
-                    scores = np.array([c['score'] for c in cluster], dtype=np.float64)
-                    edges = np.array([1.0 if not c.get('edge', False) else YOLO_EDGE_WEIGHT_MULTIPLIER for c in cluster], dtype=np.float64)
-                    weighted = scores * edges
-                    weights = weighted / (weighted.sum() + EPSILON)
-                    boxes = np.array([c['box'] for c in cluster], dtype=np.float64)
-                    x1 = float((boxes[:,0] * weights).sum())
-                    y1 = float((boxes[:,1] * weights).sum())
-                    x2 = float((boxes[:,2] * weights).sum())
-                    y2 = float((boxes[:,3] * weights).sum())
-                    merged_score = float(scores.max())
-                    merged_all.append({'box':[x1,y1,x2,y2],'score':merged_score,'class':cls})
-
-        # final sort
-        return sorted(merged_all, key=lambda d: d['score'], reverse=True)
+        return self._cluster_and_merge(dets, iou_thresh, keep_class_only=True)

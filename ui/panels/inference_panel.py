@@ -29,6 +29,7 @@ from core.inference_engine import (
     register_model_in_sqlite,
     load_model_from_sqlite,
     list_models_in_sqlite,
+    delete_model_from_sqlite,
     load_inference_result_from_shapefile,
 )
 from ui.dialogs.band_mismatch_dialog import resolve_band_matching
@@ -141,6 +142,16 @@ class InferencePanel(CollapsibleBox):
         self.btn_import_db_model.setMinimumHeight(26)
         self.btn_import_db_model.clicked.connect(self._import_model_to_db)
         db_layout.addWidget(self.btn_import_db_model)
+
+        self.btn_delete_db_model = QPushButton("Delete from DB")
+        self.btn_delete_db_model.setMinimumHeight(26)
+        self.btn_delete_db_model.setToolTip("Permanently delete the selected model from the SQLite database.")
+        self.btn_delete_db_model.setStyleSheet(
+            "QPushButton { background-color: #7f1d1d; color: white; } "
+            "QPushButton:hover { background-color: #991b1b; }"
+        )
+        self.btn_delete_db_model.clicked.connect(self._delete_model_from_db)
+        db_layout.addWidget(self.btn_delete_db_model)
 
         model_layout.addLayout(db_layout)
 
@@ -412,6 +423,33 @@ class InferencePanel(CollapsibleBox):
         self.lbl_summary.setStyleSheet("QLabel { color: #f59e0b; font-size: 10px; font-weight: bold; }")
         main_layout.addWidget(self.lbl_summary)
 
+        # Confidence Filter (post-inference, live) — filters which boxes are
+        # shown on canvas AND which ones get exported (shp/xlsx/geojson).
+        # This does NOT re-run inference; it only shows/hides boxes that were
+        # already detected. Boxes below the confidence used at inference time
+        # (self.spin_confidence at run time) simply don't exist, so raising
+        # this filter above that value has no further effect below it.
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(4)
+        filter_label = QLabel("Confidence Filter:")
+        filter_label.setStyleSheet("QLabel { color: #ddd; font-size: 10px; }")
+        filter_layout.addWidget(filter_label)
+
+        self.spin_confidence_filter = QDoubleSpinBox()
+        self.spin_confidence_filter.setRange(0.0, 1.0)
+        self.spin_confidence_filter.setSingleStep(0.01)
+        self.spin_confidence_filter.setDecimals(2)
+        self.spin_confidence_filter.setValue(0.0)
+        self.spin_confidence_filter.setEnabled(False)
+        self.spin_confidence_filter.setToolTip(
+            "Live filter: hide detections below this score.\n"
+            "Applies immediately to the canvas and to Export Result (shp/xlsx/geojson)."
+        )
+        self.spin_confidence_filter.valueChanged.connect(self._on_confidence_filter_changed)
+        filter_layout.addWidget(self.spin_confidence_filter)
+        filter_layout.addStretch()
+        main_layout.addLayout(filter_layout)
+
         # Vector Tool Buttons
         tools_layout = QHBoxLayout()
         tools_layout.setSpacing(4)
@@ -620,6 +658,53 @@ class InferencePanel(CollapsibleBox):
             self.logger.info(f"Loaded model '{model_name}' from SQLite database.")
         except Exception as e:
             QMessageBox.critical(self.main_window, "Load Failed", f"Failed to load the model from the database:\n{e}")
+
+    def _delete_model_from_db(self) -> None:
+        model_name = self.combo_db_models.currentData()
+        if not model_name:
+            QMessageBox.warning(self.main_window, "No Selection", "Please select a model from the database list first.")
+            return
+
+        reply = QMessageBox.question(
+            self.main_window,
+            "Confirm Delete",
+            f"Delete model '{model_name}' from the database?\n\n"
+            "This permanently removes the stored .pt weights and band_stats "
+            "for this model from the SQLite database. This cannot be undone.\n\n"
+            "(Past inference run history that used this model is kept for audit; "
+            "only the model registration itself is removed.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            deleted = delete_model_from_sqlite(Path(self.db_path), model_name)
+        except Exception as e:
+            QMessageBox.critical(self.main_window, "Delete Failed", f"Failed to delete the model:\n{e}")
+            return
+
+        if not deleted:
+            QMessageBox.warning(self.main_window, "Not Found", f"Model '{model_name}' was not found in the database.")
+            return
+
+        # If the currently loaded model (for the next inference run) was the
+        # one just deleted, clear that state so the panel doesn't silently
+        # keep pointing at a temp file whose DB registration no longer exists.
+        if self._model_loaded_from_db and self.lbl_model_file.text() == f"Model: {model_name} (from DB)":
+            self.model_path = None
+            self.band_stats_path = None
+            self._model_loaded_from_db = False
+            self.model_description = ""
+            self.lbl_model_file.setText("Model: None selected")
+            self.lbl_model_meta.setText("")
+            if hasattr(self.main_window, "btn_run_inference"):
+                self.main_window.btn_run_inference.setEnabled(False)
+
+        self._refresh_db_model_list()
+        QMessageBox.information(self.main_window, "Deleted", f"Model '{model_name}' has been deleted from the database.")
+        self.logger.info(f"Deleted model '{model_name}' from SQLite database.")
 
     def _select_polygon_for(self, target: str) -> None:
         """Select a drawn polygon for AOI or Exclude."""
@@ -953,6 +1038,20 @@ class InferencePanel(CollapsibleBox):
         self.btn_cancel.setEnabled(False)
         self._worker.stop()
 
+    def _on_confidence_filter_changed(self, value: float) -> None:
+        """Live-filter displayed/exportable boxes by confidence score.
+
+        Does not re-run inference. Delegates to InferenceOverlayHandler which
+        owns the actual box items and knows how to combine this with manual
+        elimination (deleted boxes stay hidden regardless of score).
+        """
+        handler = getattr(self.main_window, 'inference_overlay_handler', None)
+        if handler is None:
+            return
+        handler.set_confidence_threshold(float(value))
+        # handler.set_confidence_threshold() already refreshes self.lbl_summary
+        # via _update_panel_ui(), no need to duplicate that here.
+
     def append_log(self, text: str) -> None:
         """Append a log message to the inference console window."""
         self.log_terminal.appendPlainText(text)
@@ -1011,6 +1110,28 @@ class InferencePanel(CollapsibleBox):
         self.btn_export_shapefiles.setEnabled(True)
         self.btn_convert_to_centroids.setEnabled(n_boxes > 0)
 
+        # Reset the confidence filter for the new session. Since inference was
+        # run at self.spin_confidence.value(), that's the effective floor —
+        # nothing below it exists in `result`. Start the filter there so all
+        # freshly-detected boxes are visible by default, then let the user
+        # raise it to prune low-confidence boxes without re-running inference.
+        try:
+            floor = float(self.spin_confidence.value())
+            self.spin_confidence_filter.blockSignals(True)
+            self.spin_confidence_filter.setValue(floor)
+            self.spin_confidence_filter.blockSignals(False)
+            self.spin_confidence_filter.setEnabled(n_boxes > 0)
+            # Sync the handler's internal threshold directly too (signal was
+            # blocked above), so display_results() -> set_confidence_threshold()
+            # applies the SAME floor to the freshly created boxes below,
+            # instead of re-applying a stale threshold left over from a
+            # previous detection session.
+            handler = getattr(self.main_window, 'inference_overlay_handler', None)
+            if handler is not None:
+                handler.confidence_threshold = floor
+        except Exception as e:
+            self.logger.debug(f"Failed to reset confidence filter: {e}")
+
         # Delegate overlay rendering & session management
         if hasattr(self.main_window, "handle_inference_finished"):
             self.main_window.handle_inference_finished(result)
@@ -1055,6 +1176,7 @@ class InferencePanel(CollapsibleBox):
         # Disable DB model controls while inference is running
         self.btn_load_db_model.setEnabled(not running)
         self.btn_import_db_model.setEnabled(not running)
+        self.btn_delete_db_model.setEnabled(not running)
         self.spin_confidence.setEnabled(not running)
         self.spin_iou.setEnabled(not running)
         self.spin_tile_size.setEnabled(not running)

@@ -206,6 +206,7 @@ class InferenceOverlayHandler(QObject):
 
         self.box_items: List[InferenceBoxItem] = []
         self.raw_boxes_backup: List[Dict[str, Any]] = []
+        self.confidence_threshold: float = 0.0
         self._aoi_polygons_px = None
         self._exclude_polygons_px = None
         self.undo_stack = InferenceUndoStack()
@@ -438,6 +439,30 @@ class InferenceOverlayHandler(QObject):
             except Exception as e:
                 self.logger.debug(f"Error setting box item visibility: {e}")
 
+    def set_confidence_threshold(self, threshold: float) -> None:
+        """Live-filter box items by confidence score, without re-running inference.
+
+        Boxes with score < threshold are hidden (setVisible(False)); boxes with
+        score >= threshold are shown again. Manually eliminated boxes
+        (status == 'eliminated') always stay hidden regardless of score —
+        a manual delete should never be un-hidden by moving this slider.
+        Manually added boxes (status == 'added', score == 1.0) are effectively
+        always shown since their score is the max possible.
+
+        Because both display AND export (export_shapefiles -> active_box_records)
+        key off `item.isVisible()`, this single call keeps the canvas and the
+        shp/xlsx/geojson export in sync automatically.
+        """
+        self.confidence_threshold = float(threshold)
+        for item in self.box_items:
+            try:
+                if item.status == "eliminated":
+                    continue
+                item.setVisible(item.score >= self.confidence_threshold)
+            except Exception as e:
+                self.logger.debug(f"Error applying confidence threshold to box #{getattr(item, 'box_id', '?')}: {e}")
+        self._update_panel_ui()
+
     def display_results(self, result: InferenceResult, replace_existing: bool = True) -> None:
         if result is None or result.boxes is None or len(result.boxes) == 0:
             self.logger.info("No inference boxes to display.")
@@ -489,6 +514,12 @@ class InferenceOverlayHandler(QObject):
 
         self._next_box_id = len(self.box_items) + 1
         self._last_result_signature = result_signature
+
+        # Apply whatever confidence threshold is currently set (e.g. carried
+        # over from the panel's spin_confidence_filter) to the freshly created
+        # boxes, so canvas + export stay consistent with the UI slider state.
+        if self.confidence_threshold > 0.0:
+            self.set_confidence_threshold(self.confidence_threshold)
 
         # Synchronize inference result to active layer dictionary for persistence
         if hasattr(self.main_window, '_get_active_layer'):
@@ -629,7 +660,10 @@ class InferenceOverlayHandler(QObject):
 
         raw_count = len(self.raw_boxes_backup)
         active_items = [it for it in self.box_items if it.status != "eliminated" and it.isVisible()]
-        panel.lbl_summary.setText(f"Raw: {raw_count} | Active: {len(active_items)} boxes")
+        panel.lbl_summary.setText(
+            f"Raw: {raw_count} | Active: {len(active_items)} boxes "
+            f"(conf >= {self.confidence_threshold:.2f})"
+        )
         panel.update_undo_redo_states(self.undo_stack.can_undo(), self.undo_stack.can_redo())
 
     def export_shapefiles(
@@ -684,21 +718,34 @@ class InferenceOverlayHandler(QObject):
         class_names_corr = {}
         active_box_records = []
 
+        # NOTE: corrected_detection.shp / .xlsx / .geojson all follow the
+        # live Confidence Filter (spin_confidence_filter). A box is included
+        # here only if it is currently visible on the canvas, i.e. it was not
+        # manually deleted (status == 'eliminated') AND its score is >= the
+        # current confidence threshold. raw_detection.shp above is the only
+        # export that stays a full, unfiltered audit dump of everything the
+        # model produced.
         for item in self.box_items:
+            if item.status == "eliminated" or not item.isVisible():
+                continue
             b_coords = item.get_box_coords()
             corr_boxes.append(b_coords)
             corr_scores.append(item.score)
             corr_classes.append(0)
             corr_statuses.append(item.status)
             class_names_corr[0] = item.class_name
-            if item.status != "eliminated" and item.isVisible():
-                active_box_records.append({
-                    "id": item.box_id,
-                    "box": b_coords,
-                    "class_name": item.class_name,
-                })
+            active_box_records.append({
+                "id": item.box_id,
+                "box": b_coords,
+                "class_name": item.class_name,
+            })
 
-        if not active_box_records and self.raw_boxes_backup:
+        # Fallback only applies when box_items itself was never populated
+        # (e.g. imported session edge case). It must NOT trigger just because
+        # the confidence filter legitimately excluded everything -- otherwise
+        # raising the threshold to "nothing passes" would silently dump the
+        # full raw set again, defeating the filter.
+        if not active_box_records and not self.box_items and self.raw_boxes_backup:
             for idx, raw_box in enumerate(self.raw_boxes_backup, start=1):
                 active_box_records.append({
                     "id": raw_box.get("id", idx),
