@@ -23,16 +23,10 @@ htmlcov/
 *~
 .DS_Store
 
-# Build artifacts (nuitka)
-build/nuitka/dist/
-build/nuitka/main.build/
-build/nuitka/*.xml
-build/nuitka/*.zip
-/build/_validation_dist/
-/build/_validation_work/
+# Build artifacts (nuitka, pyinstaller, dll)
+/build/
 /dist/
 /installer/
-/build/KanopiAI/
 
 # Geospatial data files (user data)
 *.geojson
