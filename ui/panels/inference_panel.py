@@ -765,6 +765,15 @@ class InferencePanel(CollapsibleBox):
         if target == "aoi":
             self._aoi_polygon_ids = [poly_id]
             self.lbl_aoi_polygon.setText(f"Polygon AOI: {polygons[idx]['name']} (crop → pad → scan)")
+            # BUGFIX: run_inference() reads combo_processed_area to decide the
+            # crop region. If it's still on "Visible part" or "Entire layer",
+            # it silently overwrites/nulls aoi_polygons_px and the polygon
+            # picked here is discarded. Switch it automatically so the
+            # selection actually takes effect.
+            if hasattr(self, "combo_processed_area"):
+                idx_from_polygons = self.combo_processed_area.findText("From polygons (shapefile)")
+                if idx_from_polygons >= 0:
+                    self.combo_processed_area.setCurrentIndex(idx_from_polygons)
         else:
             self._exclude_polygon_ids = [poly_id]
             self.lbl_exclude_polygon.setText(f"Polygon Exclude: {polygons[idx]['name']}")
