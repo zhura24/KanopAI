@@ -4,13 +4,15 @@ from PyQt6.QtWidgets import QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsTe
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QPen, QBrush, QColor, QFont
 import math
+import logging
 from pyproj import CRS, Transformer, Geod
 
 
 class MeasurementLine:
     """Representasi satu garis pengukuran dengan titik awal dan akhir."""
 
-    def __init__(self, start_point, scene):
+    def __init__(self, start_point, scene, measurement_id):
+        self.measurement_id = measurement_id
         self.start_point = start_point
         self.end_point = start_point
         self.scene = scene
@@ -19,6 +21,8 @@ class MeasurementLine:
         self.start_marker = None
         self.end_marker = None
         self.label_item = None
+        self.preview_line = None
+        self._finished = False
 
         self.line_color = QColor(255, 255, 0)
         self.marker_color = QColor(255, 255, 0)
@@ -34,7 +38,15 @@ class MeasurementLine:
         self.line_item = QGraphicsLineItem()
         self.line_item.setPen(pen)
         self.line_item.setZValue(1000)
+        self.line_item.setVisible(False)
         self.scene.addItem(self.line_item)
+
+        preview_pen = QPen(self.line_color, self.line_width, Qt.PenStyle.DashLine)
+        preview_pen.setCosmetic(True)
+        self.preview_line = QGraphicsLineItem()
+        self.preview_line.setPen(preview_pen)
+        self.preview_line.setZValue(999)
+        self.scene.addItem(self.preview_line)
 
         marker_pen = QPen(self.marker_color, 1)
         marker_pen.setCosmetic(True)
@@ -81,11 +93,14 @@ class MeasurementLine:
 
     def _update_graphics(self):
         """Update graphics items to reflect current measurement"""
-        # Update line
-        self.line_item.setLine(
+        line = (
             self.start_point.x(), self.start_point.y(),
             self.end_point.x(), self.end_point.y()
         )
+        if self.line_item:
+            self.line_item.setLine(*line)
+        if self.preview_line:
+            self.preview_line.setLine(*line)
 
         # Update end marker
         self.end_marker.setPos(self.end_point)
@@ -100,6 +115,16 @@ class MeasurementLine:
         self.label_item.setPlainText(text)
         self._update_graphics()
 
+    def finalize(self):
+        """Convert the temporary preview into the permanent measurement line."""
+        self._finished = True
+        if self.preview_line:
+            self.scene.removeItem(self.preview_line)
+            self.preview_line = None
+        if self.line_item:
+            self.line_item.setVisible(True)
+        self._update_graphics()
+
     def get_distance_pixels(self):
         """Get distance in pixels"""
         dx = self.end_point.x() - self.start_point.x()
@@ -108,14 +133,15 @@ class MeasurementLine:
 
     def remove(self):
         """Remove all graphics items from scene"""
-        if self.line_item:
-            self.scene.removeItem(self.line_item)
-        if self.start_marker:
-            self.scene.removeItem(self.start_marker)
-        if self.end_marker:
-            self.scene.removeItem(self.end_marker)
-        if self.label_item:
-            self.scene.removeItem(self.label_item)
+        for attr in ('line_item', 'start_marker', 'end_marker', 'label_item', 'preview_line'):
+            item = getattr(self, attr, None)
+            if item is not None:
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+                setattr(self, attr, None)
+        self.scene.update()
+        for view in self.scene.views():
+            view.viewport().update()
 
 
 class MeasurementManager:
@@ -142,9 +168,15 @@ class MeasurementManager:
     def __init__(self, scene, raster_metadata=None):
         self.scene = scene
         self.metadata = raster_metadata
+        self.logger = logging.getLogger(__name__)
         self.current_unit = 'meters'
         self.measurement_mode = 'cartesian'  # 'cartesian' or 'ellipsoidal'
         self.measurements = []  # List of MeasurementLine objects
+        # Stable ID -> all graphics owned by that measurement.  Keeping the
+        # item references together prevents deletion by list index from
+        # leaving orphaned scene items behind.
+        self.measurement_items = {}
+        self._next_measurement_id = 1
         self.current_measurement = None
 
         # Pixel to meter conversion (from georeferencing or manual calibration)
@@ -382,7 +414,11 @@ class MeasurementManager:
 
     def start_measurement(self, start_point):
         """Start a new measurement"""
-        self.current_measurement = MeasurementLine(start_point, self.scene)
+        if self.current_measurement:
+            self.cancel_measurement()
+        measurement_id = self._next_measurement_id
+        self._next_measurement_id += 1
+        self.current_measurement = MeasurementLine(start_point, self.scene, measurement_id)
         return self.current_measurement
 
     def update_measurement(self, end_point):
@@ -394,9 +430,20 @@ class MeasurementManager:
     def finish_measurement(self):
         """Finish current measurement and add to list"""
         if self.current_measurement:
-            self.measurements.append(self.current_measurement)
-            result = self._get_measurement_info(self.current_measurement)
+            measurement = self.current_measurement
+            measurement.finalize()
+            self.measurements.append(measurement)
+            self.measurement_items[measurement.measurement_id] = {
+                'measurement': measurement,
+                'line': measurement.line_item,
+                'start_marker': measurement.start_marker,
+                'end_marker': measurement.end_marker,
+                'text_label': measurement.label_item,
+                'preview_line': measurement.preview_line,
+            }
+            result = self._get_measurement_info(measurement)
             self.current_measurement = None
+            self.scene.update()
             return result
         return None
 
@@ -405,23 +452,46 @@ class MeasurementManager:
         if self.current_measurement:
             self.current_measurement.remove()
             self.current_measurement = None
+            self.scene.update()
+
+    def remove_measurement(self, measurement_id):
+        """Remove one completed measurement by its stable ID."""
+        try:
+            measurement_id = int(measurement_id)
+        except (TypeError, ValueError):
+            return False
+
+        items = self.measurement_items.pop(measurement_id, None)
+        if items is None:
+            return False
+        measurement = items['measurement']
+        if measurement in self.measurements:
+            self.measurements.remove(measurement)
+        measurement.remove()
+        return True
+
+    def removeMeasurement(self, measurement_id):
+        """Qt/API-friendly alias for remove_measurement."""
+        return self.remove_measurement(measurement_id)
 
     def clear_all_measurements(self):
         """Remove all measurements"""
-        for measurement in self.measurements:
+        for measurement in list(self.measurements):
             measurement.remove()
         self.measurements.clear()
+        self.measurement_items.clear()
 
         if self.current_measurement:
             self.current_measurement.remove()
             self.current_measurement = None
+        self.scene.update()
+        for view in self.scene.views():
+            view.viewport().update()
 
     def delete_last_measurement(self):
         """Delete the last completed measurement"""
         if self.measurements:
-            last_measurement = self.measurements.pop()
-            last_measurement.remove()
-            return True
+            return self.remove_measurement(self.measurements[-1].measurement_id)
         return False
 
     def _update_measurement_label(self, measurement):
@@ -530,6 +600,7 @@ class MeasurementManager:
 
         # Basic info
         info = {
+            'measurement_id': measurement.measurement_id,
             'start_point_px': start_px,
             'end_point_px': end_px,
             'start_point_world': start_world,

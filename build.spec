@@ -146,6 +146,13 @@ hiddenimports += [
     "openpyxl.styles",
     "openpyxl.utils",
 
+    # --- scikit-learn -- dipakai core.hara_regression (eHARA extraction) ---
+    "sklearn",
+    "sklearn.decomposition",
+    "sklearn.decomposition._pca",
+    "sklearn.preprocessing",
+    "sklearn.pipeline",
+
     # --- PyQt6 ---
     "PyQt6.QtCore",
     "PyQt6.QtGui",

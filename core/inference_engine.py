@@ -7,8 +7,6 @@ lokasi supaya konsisten dengan struktur folder core/ yang sudah ada.
 """
 
 import json
-import hashlib
-import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -1469,9 +1467,6 @@ class InferenceEngine:
         """
         import time
         _t_start = time.perf_counter()
-        audit_enabled = os.getenv("KANOPIAI_INFERENCE_AUDIT", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
 
         if self.model is None:
             self.load()
@@ -1637,27 +1632,6 @@ class InferenceEngine:
                     dtype=np.float32,
                 ) / 255.0
                 model_batch = torch.from_numpy(model_batch_np)
-
-                if audit_enabled:
-                    channel_stats = [
-                        (
-                            float(model_batch_np[:, channel].min()),
-                            float(model_batch_np[:, channel].max()),
-                            float(model_batch_np[:, channel].mean()),
-                        )
-                        for channel in range(model_batch_np.shape[1])
-                    ]
-                    tile0_sha256 = hashlib.sha256(
-                        np.ascontiguousarray(model_batch_np[0]).tobytes()
-                    ).hexdigest()
-                    self.log_fn(
-                        "[AUDIT] model.predict input: "
-                        f"shape={tuple(model_batch.shape)}, dtype={model_batch.dtype}, "
-                        f"min={model_batch_np.min():.6f}, max={model_batch_np.max():.6f}, "
-                        f"mean={model_batch_np.mean():.6f}, batch={len(offset_batch)}, "
-                        f"offsets={[item[:2] for item in offset_batch]}, "
-                        f"per_channel={channel_stats}, tile0_sha256={tile0_sha256}"
-                    )
 
                 results = self.model.predict(
                     source=model_batch,

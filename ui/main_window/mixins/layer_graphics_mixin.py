@@ -25,6 +25,8 @@ class LayerGraphicsMixin:
                 items['closing_line'].setVisible(checked)
             if items.get('filled_item'):
                 items['filled_item'].setVisible(checked)
+            if items.get('area_label'):
+                items['area_label'].setVisible(checked)
 
         # Also toggle current drawing polygon in viewer
         if hasattr(self, 'viewer') and self.viewer:

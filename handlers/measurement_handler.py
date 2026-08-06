@@ -35,12 +35,6 @@ class MeasurementHandler:
     
     
     def on_measurement_finished(self, measurement_info):
-        all_measurements = self.main_window.viewer.get_all_measurements()
-        if len(all_measurements) > 1:
-            self.main_window.viewer.measurement_manager.measurements = [
-                self.main_window.viewer.measurement_manager.measurements[-1]
-            ]
-        
         self.last_measurement_info = measurement_info
         self.display_measurement_result(measurement_info)
         
