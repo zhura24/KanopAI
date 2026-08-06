@@ -105,32 +105,41 @@ class EHaraHandler:
         radius = 2.0
         band1_idx, band2_idx, band3_idx = 1, 2, 3
         training_data_path = None
+        ndvi_enabled = True    # default: compute spectral indices
+        training_enabled = True  # default: run nutrient prediction
         panel = getattr(self.main_window, "ehara_panel", None)
         if panel is not None:
             if hasattr(panel, "spin_ehara_radius"):
                 radius = panel.spin_ehara_radius.value()
-            if hasattr(panel, "spin_ehara_band1"):
-                band1_idx = panel.spin_ehara_band1.value()
-            if hasattr(panel, "spin_ehara_band2"):
-                band2_idx = panel.spin_ehara_band2.value()
-            if hasattr(panel, "spin_ehara_band3"):
-                band3_idx = panel.spin_ehara_band3.value()
-            training_data_path = getattr(panel, "training_data_path", None)
+            # Only read band indices when the NDVI section is enabled
+            ndvi_enabled = getattr(panel, "_ndvi_enabled", True)
+            if ndvi_enabled:
+                if hasattr(panel, "spin_ehara_band1"):
+                    band1_idx = panel.spin_ehara_band1.value()
+                if hasattr(panel, "spin_ehara_band2"):
+                    band2_idx = panel.spin_ehara_band2.value()
+                if hasattr(panel, "spin_ehara_band3"):
+                    band3_idx = panel.spin_ehara_band3.value()
+            # Only use training data when the training section is enabled
+            training_enabled = getattr(panel, "_training_enabled", True)
+            if training_enabled:
+                training_data_path = getattr(panel, "training_data_path", None)
 
         band_count = dataset.count
 
-        # Validate the chosen band indices against the actual raster before
-        # doing any work.
-        for label, idx in (("Band 1", band1_idx), ("Band 2", band2_idx), ("Band 3", band3_idx)):
-            if idx < 1 or idx > band_count:
-                QMessageBox.warning(
-                    self.main_window,
-                    "Invalid Band Index",
-                    f"{label} index ({idx}) is out of range for this raster, "
-                    f"which has {band_count} band(s). Please adjust the band "
-                    "index in the eHara panel."
-                )
-                return
+        # Validate the chosen band indices against the actual raster — only
+        # when the NDVI section is active (indices are needed only then).
+        if ndvi_enabled:
+            for label, idx in (("Band 1", band1_idx), ("Band 2", band2_idx), ("Band 3", band3_idx)):
+                if idx < 1 or idx > band_count:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "Invalid Band Index",
+                        f"{label} index ({idx}) is out of range for this raster, "
+                        f"which has {band_count} band(s). Please adjust the band "
+                        "index in the eHara panel."
+                    )
+                    return
 
         # Warn if the raster CRS is geographic (degrees), the radius in meters won't be valid
         try:
@@ -151,11 +160,11 @@ class EHaraHandler:
         except Exception as e:
             self.logger.debug(f"Failed to check CRS type: {e}")
 
-        # 4. If training data was provided, load + validate it up-front so
-        # we fail fast before doing the (potentially slow) per-band
-        # extraction below.
+        # 4. If training data was provided (and the training section is enabled),
+        # load + validate it up-front so we fail fast before doing the
+        # (potentially slow) per-band extraction below.
         hara_model = None
-        if training_data_path:
+        if training_enabled and training_data_path:
             try:
                 training_df = load_training_data(training_data_path)
                 dropped = training_df.attrs.get("rows_dropped", 0)
@@ -271,16 +280,20 @@ class EHaraHandler:
 
         df_result = pd.DataFrame(result_data)
 
-        # 7. Compute NDVI/GNDVI/SR from the user-chosen band1/band2/band3
-        df_result["band1"] = df_result[f"Band_{band1_idx}_mean"]
-        df_result["band2"] = df_result[f"Band_{band2_idx}_mean"]
-        df_result["band3"] = df_result[f"Band_{band3_idx}_mean"]
-        df_result["NDVI"] = calculate_ndvi(df_result["band1"], df_result["band3"])
-        df_result["GNDVI"] = calculate_gndvi(df_result["band2"], df_result["band3"])
-        df_result["SR"] = calculate_sr(df_result["band1"], df_result["band3"])
+        # 7. Compute NDVI/GNDVI/SR — only when the spectral index section is
+        # enabled.  When disabled the Excel output only contains the band mean
+        # columns (ID, Easting, Northing, Band_1_mean, Band_2_mean, …).
+        if ndvi_enabled:
+            df_result["band1"] = df_result[f"Band_{band1_idx}_mean"]
+            df_result["band2"] = df_result[f"Band_{band2_idx}_mean"]
+            df_result["band3"] = df_result[f"Band_{band3_idx}_mean"]
+            df_result["NDVI"] = calculate_ndvi(df_result["band1"], df_result["band3"])
+            df_result["GNDVI"] = calculate_gndvi(df_result["band2"], df_result["band3"])
+            df_result["SR"] = calculate_sr(df_result["band1"], df_result["band3"])
 
-        # 8. Optional N/P/K/Mg nutrient prediction
-        if hara_model is not None:
+        # 8. Optional N/P/K/Mg nutrient prediction — only when the training
+        # section is enabled AND a model was successfully fitted.
+        if training_enabled and hara_model is not None:
             try:
                 nutrient_df = hara_model.predict(df_result)
                 df_result = pd.concat([df_result, nutrient_df], axis=1)
