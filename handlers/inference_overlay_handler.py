@@ -753,7 +753,16 @@ class InferenceOverlayHandler(QObject):
                     "class_name": raw_box.get("class", "unknown"),
                 })
 
-        if corr_boxes:
+        # BUGFIX: previously this ran for ANY export as long as there were
+        # visible boxes, so a "_corrected_detection.shp" was created even if
+        # the user never eliminated/added/edited a single box (every box
+        # defaults to status="retained"). That made "corrected" misleading --
+        # it was identical to the raw export except for the status field.
+        # Only write it when the undo stack shows an actual correction action
+        # happened (eliminate/add/edit), regardless of whether it was later
+        # undone back to a state with boxes still remaining.
+        user_made_corrections = bool(self.undo_stack.history)
+        if corr_boxes and user_made_corrections:
             save_corrected_shapefile(
                 raster_path=p_raster,
                 boxes=np.array(corr_boxes, dtype=np.float32),
@@ -765,6 +774,11 @@ class InferenceOverlayHandler(QObject):
                 class_names=class_names_corr,
                 validator_name=reviewer_name,
                 correction_date=correction_date,
+            )
+        elif corr_boxes and not user_made_corrections:
+            self.logger.info(
+                "No manual corrections detected -- skipping "
+                f"'{corrected_shp.name}' (identical to raw export otherwise)."
             )
 
         excel_path = self._export_inference_excel(
