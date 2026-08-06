@@ -2,6 +2,10 @@ from typing import Optional, Any, Tuple, List
 # pyrefly: ignore [missing-import]
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QGraphicsRectItem, QGraphicsTextItem
 from PyQt6.QtWidgets import QToolTip
+from typing import Optional, Any, Tuple, List
+# pyrefly: ignore [missing-import]
+from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QGraphicsRectItem, QGraphicsTextItem, QGraphicsEllipseItem
+from PyQt6.QtWidgets import QToolTip
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer, QEvent
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QWheelEvent, QCursor, QBrush, QColor, QPen, QFont, QTransform
 import numpy as np
@@ -10,6 +14,37 @@ from core.tile_manager import TileManager
 from core.tile_loader import AsyncTileLoader
 from ui.measurement_tool import MeasurementManager
 from utils.logger_config import get_logger
+
+class PolygonVertexItem(QGraphicsEllipseItem):
+    def __init__(self, scene_pos, size, pen, brush, viewer):
+        half_size = size / 2
+        # Set Rect to center at origin so pos() is exactly the scene pos
+        super().__init__(-half_size, -half_size, size, size)
+        self.setPos(scene_pos)
+        self.setPen(pen)
+        self.setBrush(brush)
+        self.viewer = viewer
+        
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setZValue(101) # Above lines
+        
+        self.polygon_data = None
+        
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            if self.polygon_data is not None and hasattr(self.viewer, 'refreshPolygonGeometry'):
+                self.viewer.refreshPolygonGeometry(self.polygon_data)
+        return super().itemChange(change, value)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        # When drag is finished, update the UI sidebar
+        window = self.viewer.window()
+        if hasattr(window, '_refresh_polygon_list_ui'):
+            window._refresh_polygon_list_ui()
 
 
 class RasterViewer(QGraphicsView):
@@ -508,6 +543,12 @@ class RasterViewer(QGraphicsView):
         super().enterEvent(event)
 
     def mousePressEvent(self, event):
+        # Allow graphics items like PolygonVertexItem to handle clicks first if they are movable
+        item = self.itemAt(event.pos())
+        if hasattr(item, 'flags') and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable):
+            super().mousePressEvent(event)
+            return
+
         # Handle polygon drawing mode
         if self.polygon_drawing_mode:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -1627,6 +1668,18 @@ class RasterViewer(QGraphicsView):
         """Clear all measurements from the scene"""
         self.measurement_manager.clear_all_measurements()
 
+    def remove_measurement(self, measurement_id):
+        """Remove one measurement by ID and refresh the view."""
+        removed = self.measurement_manager.remove_measurement(measurement_id)
+        if removed:
+            self.scene.update()
+            self.viewport().update()
+        return removed
+
+    def removeMeasurement(self, measurement_id):
+        """Compatibility alias for ID-based measurement deletion."""
+        return self.remove_measurement(measurement_id)
+
     def get_all_measurements(self):
         """Get info about all measurements"""
         return self.measurement_manager.get_all_measurements_info()
@@ -1695,16 +1748,14 @@ class RasterViewer(QGraphicsView):
         self.polygon_vertices.append(scene_pos)
 
         # Draw vertex marker
-        half_size = self.polygon_vertex_size / 2
-        vertex_item = self.scene.addEllipse(
-            scene_pos.x() - half_size,
-            scene_pos.y() - half_size,
-            self.polygon_vertex_size,
+        vertex_item = PolygonVertexItem(
+            scene_pos,
             self.polygon_vertex_size,
             QPen(self.polygon_vertex_outline_color, 2),
-            QBrush(self.polygon_vertex_color)
+            QBrush(self.polygon_vertex_color),
+            self
         )
-        vertex_item.setZValue(100)
+        self.scene.addItem(vertex_item)
         self.polygon_vertex_items.append(vertex_item)
 
         # Draw line from previous vertex
@@ -1812,33 +1863,51 @@ class RasterViewer(QGraphicsView):
         if len(self.polygon_vertices) < 3:
             self.logger.warning("get_drawn_polygon_data: Less than 3 vertices")
             return None
-
-        # Convert scene coordinates to pixel coordinates
-        # Scene coordinates ARE pixel coordinates in our case (1:1 mapping)
         pixel_coords = []
-        for scene_pos in self.polygon_vertices:
-            # Scene coordinates are already in pixel space
-            pixel_coords.append((scene_pos.x(), scene_pos.y()))
+        for vertex_item in self.polygon_vertex_items:
+            if isinstance(vertex_item, PolygonVertexItem):
+                pixel_coords.append((vertex_item.pos().x(), vertex_item.pos().y()))
+            else:
+                # Fallback for standard items
+                rect = vertex_item.rect()
+                pixel_coords.append((vertex_item.x() + rect.x() + rect.width()/2, 
+                                     vertex_item.y() + rect.y() + rect.height()/2))
 
         self.logger.debug(f"get_drawn_polygon_data: Converted {len(pixel_coords)} vertices to pixel coords")
 
-        # Convert pixel to geo coordinates
+        # Convert pixel to geo coordinates using the same affine transform
+        # used by the measurement tool.  Keep these coordinates for export,
+        # but never use geographic degrees directly for area calculation.
         geo_coords = []
-        metadata = self.measurement_manager.metadata
-        if metadata and 'transform' in metadata:
-            transform = metadata['transform']
-            for px, py in pixel_coords:
-                # Use affine transform to convert pixel to geo
-                geo_x = transform.c + px * transform.a + py * transform.b
-                geo_y = transform.f + px * transform.d + py * transform.e
-                geo_coords.append((geo_x, geo_y))
-
-            # Calculate area using geo coordinates
-            area_m2 = self._calculate_polygon_area_geo(geo_coords)
-            self.logger.debug(f"get_drawn_polygon_data: Calculated area = {area_m2:.2f} m²")
+        if self.measurement_manager.is_georeferenced:
+            geo_coords = [
+                self.measurement_manager.pixel_to_world(px, py)
+                for px, py in pixel_coords
+            ]
         else:
-            area_m2 = 0
-            self.logger.warning("get_drawn_polygon_data: No metadata available for geo conversion")
+            metadata = self.measurement_manager.metadata
+            transform = metadata.get('transform') if metadata else None
+            if transform is not None:
+                try:
+                    geo_coords = [
+                        (
+                            transform.c + px * transform.a + py * transform.b,
+                            transform.f + px * transform.d + py * transform.e,
+                        )
+                        for px, py in pixel_coords
+                    ]
+                except AttributeError:
+                    values = list(transform)
+                    geo_coords = [
+                        (
+                            values[2] + px * values[0] + py * values[1],
+                            values[5] + px * values[3] + py * values[4],
+                        )
+                        for px, py in pixel_coords
+                    ]
+
+        area_m2 = self.calculate_polygon_area(pixel_coords, geo_coords)
+        self.logger.debug(f"get_drawn_polygon_data: Calculated area = {area_m2:.2f} m²")
 
         return {
             'pixel_coords': pixel_coords,
@@ -1846,54 +1915,198 @@ class RasterViewer(QGraphicsView):
             'area_m2': area_m2
         }
 
-    def _calculate_polygon_area_geo(self, geo_coords):
-        """Calculate polygon area in m² using proper geodesic calculation"""
-        if len(geo_coords) < 3:
-            return 0
+    @staticmethod
+    def _shoelace_area(coords):
+        """Return absolute planar area for a closed or open coordinate ring."""
+        if len(coords) < 3:
+            return 0.0
+        return abs(sum(
+            coords[i][0] * coords[(i + 1) % len(coords)][1]
+            - coords[(i + 1) % len(coords)][0] * coords[i][1]
+            for i in range(len(coords))
+        )) / 2.0
 
-        try:
-            # Try to use pyproj for accurate geodesic area calculation
-            from pyproj import Geod
+    def calculate_polygon_area(self, pixel_coords, geo_coords=None):
+        """Calculate area in square metres without using lon/lat as metres.
 
-            # WGS84 ellipsoid for accurate area calculation
-            geod = Geod(ellps='WGS84')
+        Projected CRS geometries are measured in their native units and
+        converted to metres using the CRS axis unit factors.  Geographic CRS
+        geometries are projected to a local UTM CRS before applying the
+        planar area formula.  Unreferenced rasters use the calibrated pixel
+        size when available.
+        """
+        if len(pixel_coords) < 3:
+            return 0.0
 
-            # Extract lon, lat separately
-            lons = [coord[0] for coord in geo_coords]
-            lats = [coord[1] for coord in geo_coords]
+        crs = self.measurement_manager.crs
+        if geo_coords and crs:
+            try:
+                if crs.is_geographic:
+                    from pyproj import Transformer
+                    lon = sum(point[0] for point in geo_coords) / len(geo_coords)
+                    lat = sum(point[1] for point in geo_coords) / len(geo_coords)
+                    zone = max(1, min(60, int((lon + 180) // 6) + 1))
+                    utm_epsg = (32600 if lat >= 0 else 32700) + zone
+                    transformer = Transformer.from_crs(
+                        crs, f"EPSG:{utm_epsg}", always_xy=True
+                    )
+                    projected = [transformer.transform(x, y) for x, y in geo_coords]
+                    return self._shoelace_area(projected)
 
-            # Calculate geodesic area (returns area in m²)
-            area, perimeter = geod.polygon_area_perimeter(lons, lats)
+                unit_factors = [
+                    axis.unit_conversion_factor
+                    for axis in crs.axis_info[:2]
+                    if axis.unit_conversion_factor
+                ]
+                factor_x = unit_factors[0] if unit_factors else 1.0
+                factor_y = unit_factors[1] if len(unit_factors) > 1 else factor_x
+                return self._shoelace_area(geo_coords) * factor_x * factor_y
+            except Exception as exc:
+                self.logger.warning("Projected polygon area failed: %s", exc)
 
-            # Return absolute value (area might be negative depending on winding order)
-            return abs(area)
+        pixel_area = self._shoelace_area(pixel_coords)
+        if self.measurement_manager.pixel_size_x and self.measurement_manager.pixel_size_y:
+            return pixel_area * abs(
+                self.measurement_manager.pixel_size_x
+                * self.measurement_manager.pixel_size_y
+            )
+        return pixel_area
 
-        except ImportError:
-            # Fallback to Shoelace formula if pyproj not available
-            # NOTE: This is NOT accurate for geographic coordinates in degrees!
-            # It's only a rough approximation
-            self.logger.warning("pyproj not available, using Shoelace formula (inaccurate for geographic coords)")
+    def polygon_area_text(self, area_m2):
+        """Format the area label in the UAT-required m²/ha form."""
+        if area_m2 > 10000:
+            return f"Area\n{area_m2 / 10000:.2f} ha ({area_m2:,.0f} m²)"
+        return f"Area\n{area_m2:,.2f} m²"
 
-            area = 0
-            n = len(geo_coords)
-            for i in range(n):
-                j = (i + 1) % n
-                area += geo_coords[i][0] * geo_coords[j][1]
-                area -= geo_coords[j][0] * geo_coords[i][1]
+    def create_polygon_area_label(self, area_m2, pixel_coords, color=None):
+        """Create a scene label for one polygon and position it at its centre."""
+        label = QGraphicsTextItem()
+        label.setPlainText(self.polygon_area_text(area_m2))
+        label.setDefaultTextColor(color or self.polygon_line_color)
+        label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        label.setZValue(103)
+        label.setFlag(QGraphicsTextItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        self.scene.addItem(label)
+        self.update_polygon_area_label(label, area_m2, pixel_coords)
+        return label
 
-            area = abs(area) / 2.0
+    def refreshPolygonGeometry(self, polygon):
+        """Update polygon geometry when a vertex is moved"""
+        items = polygon.get('items', {})
+        vertex_items = items.get('vertex_items', [])
+        line_items = items.get('line_items', [])
+        filled_item = items.get('filled_item')
+        
+        if not vertex_items:
+            return
+            
+        # Get new pixel coords
+        pixel_coords = []
+        for v in vertex_items:
+            if isinstance(v, PolygonVertexItem):
+                pixel_coords.append((v.pos().x(), v.pos().y()))
+            else:
+                pixel_coords.append((v.x() + v.rect().x() + v.rect().width()/2, 
+                                     v.y() + v.rect().y() + v.rect().height()/2))
+            
+        polygon['pixel_coords'] = pixel_coords
+        
+        # Update lines
+        from PyQt6.QtCore import QLineF
+        for i, line_item in enumerate(line_items):
+            if line_item:
+                p1 = vertex_items[i].pos() if isinstance(vertex_items[i], PolygonVertexItem) else vertex_items[i].sceneBoundingRect().center()
+                p2 = vertex_items[(i + 1) % len(vertex_items)].pos() if isinstance(vertex_items[(i + 1) % len(vertex_items)], PolygonVertexItem) else vertex_items[(i + 1) % len(vertex_items)].sceneBoundingRect().center()
+                line_item.setLine(QLineF(p1, p2))
+                
+        # Update filled polygon
+        if filled_item:
+            from PyQt6.QtGui import QPolygonF
+            from PyQt6.QtCore import QPointF
+            qpoly = QPolygonF()
+            for p in pixel_coords:
+                qpoly.append(QPointF(p[0], p[1]))
+            filled_item.setPolygon(qpoly)
+            
+        # Update Area and Geo Coords
+        geo_coords = []
+        if hasattr(self, 'measurement_manager') and self.measurement_manager:
+            if self.measurement_manager.is_georeferenced:
+                geo_coords = [
+                    self.measurement_manager.pixel_to_world(px, py)
+                    for px, py in pixel_coords
+                ]
+            else:
+                metadata = self.measurement_manager.metadata
+                transform = metadata.get('transform') if metadata else None
+                if transform is not None:
+                    try:
+                        geo_coords = [
+                            (
+                                transform.c + px * transform.a + py * transform.b,
+                                transform.f + px * transform.d + py * transform.e,
+                            )
+                            for px, py in pixel_coords
+                        ]
+                    except AttributeError:
+                        values = list(transform)
+                        geo_coords = [
+                            (
+                                values[2] + px * values[0] + py * values[1],
+                                values[5] + px * values[3] + py * values[4],
+                            )
+                            for px, py in pixel_coords
+                        ]
+        
+        polygon['geo_coords'] = geo_coords
+        
+        # Re-calculate area
+        area_m2 = self.calculatePolygonArea(pixel_coords, geo_coords)
+        polygon['area_m2'] = area_m2
+        
+        # Update label
+        self.updateAreaLabel(polygon)
 
-            # Rough conversion from square degrees to square meters at equator
-            # 1 degree ≈ 111,320 meters at equator
-            # This is VERY rough and gets worse away from equator
-            area_m2 = area * (111320 ** 2)
+    def calculatePolygonArea(self, pixel_coords, geo_coords=None):
+        return self.calculate_polygon_area(pixel_coords, geo_coords)
 
-            self.logger.warning(f"Area calculated using rough approximation: {area_m2:.2f} m²")
-            return area_m2
+    def updateAreaLabel(self, polygon):
+        area_m2 = polygon.get('area_m2', 0)
+        pixel_coords = polygon.get('pixel_coords', [])
+        label = polygon.get('items', {}).get('area_label')
+        if label:
+            self.update_polygon_area_label(label, area_m2, pixel_coords)
 
-        except Exception as e:
-            self.logger.error(f"Error calculating polygon area: {e}", exc_info=True)
-            return 0
+    def deletePolygon(self, polygon, main_window=None):
+        """Delete a polygon and its items"""
+        items = polygon.get('items', {})
+        for item in items.get('vertex_items', []):
+            if item and item.scene():
+                item.scene().removeItem(item)
+        for item in items.get('line_items', []):
+            if item and item.scene():
+                item.scene().removeItem(item)
+        if items.get('closing_line') and items['closing_line'].scene():
+            items['closing_line'].scene().removeItem(items['closing_line'])
+        if items.get('filled_item') and items['filled_item'].scene():
+            items['filled_item'].scene().removeItem(items['filled_item'])
+        if items.get('area_label') and items['area_label'].scene():
+            items['area_label'].scene().removeItem(items['area_label'])
+            
+        if main_window and hasattr(main_window, 'drawn_polygons') and polygon in main_window.drawn_polygons:
+            main_window.drawn_polygons.remove(polygon)
+            if hasattr(main_window, '_refresh_polygon_list_ui'):
+                main_window._refresh_polygon_list_ui()
+
+    def update_polygon_area_label(self, label, area_m2, pixel_coords):
+        """Update one polygon label and move it to the polygon centroid."""
+        if label is None:
+            return
+        label.setPlainText(self.polygon_area_text(area_m2))
+        if pixel_coords:
+            center_x = sum(point[0] for point in pixel_coords) / len(pixel_coords)
+            center_y = sum(point[1] for point in pixel_coords) / len(pixel_coords)
+            label.setPos(center_x, center_y)
 
     def clear_polygon(self):
         """Clear all polygon items from scene"""

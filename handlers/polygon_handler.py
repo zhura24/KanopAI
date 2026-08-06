@@ -158,6 +158,18 @@ class PolygonHandler:
         if hasattr(self.main_window, '_update_polygon_colors'):
             self.main_window._update_polygon_colors(polygon)
 
+        # Make sure the area label is generated
+        if hasattr(self.main_window, 'updateAreaLabel'):
+            self.main_window.updateAreaLabel(polygon)
+
+        # Inject polygon data into vertex items for editability
+        for i, v_item in enumerate(items['vertex_items']):
+            if hasattr(v_item, 'polygon_data'):
+                v_item.polygon_data = polygon
+            if v_item:
+                v_item.polygon_id = polygon_id
+                v_item.vertex_idx = i
+
         # Detach temporary viewer state without removing the persisted scene items.
         viewer.polygon_vertices = []
         viewer.polygon_vertex_items = []
@@ -205,6 +217,8 @@ class PolygonHandler:
                 items['closing_line'].scene().removeItem(items['closing_line'])
             if items.get('filled_item') and items['filled_item'].scene():
                 items['filled_item'].scene().removeItem(items['filled_item'])
+            if items.get('area_label') and items['area_label'].scene():
+                items['area_label'].scene().removeItem(items['area_label'])
 
         self.main_window.drawn_polygons.clear()
         self.main_window.selected_polygon_ids.clear()
