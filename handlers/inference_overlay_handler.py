@@ -761,6 +761,7 @@ class InferenceOverlayHandler(QObject):
         # Only write it when the undo stack shows an actual correction action
         # happened (eliminate/add/edit), regardless of whether it was later
         # undone back to a state with boxes still remaining.
+        user_made_corrections = bool(self.undo_stack.history)
         corrected_was_generated = bool(corr_boxes and user_made_corrections)
         if corrected_was_generated:
             save_corrected_shapefile(
