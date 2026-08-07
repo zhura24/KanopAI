@@ -25,6 +25,13 @@ class PolygonVertexItem(QGraphicsEllipseItem):
         self.setBrush(brush)
         self.viewer = viewer
         
+        # NOTE: movable is intentionally left OFF here. While a polygon is
+        # actively being drawn (before "Finish"), PolygonHandler keeps this
+        # True so the user can nudge a vertex before closing the shape. Once
+        # a polygon is finished it is explicitly locked (movable=False) and
+        # can only be dragged again after the user enters Edit mode and
+        # clicks that specific polygon - see RasterViewer.mousePressEvent
+        # and PolygonHandler.toggle_edit_polygon_mode / _select_polygon_for_edit.
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, False)
@@ -32,6 +39,8 @@ class PolygonVertexItem(QGraphicsEllipseItem):
         self.setZValue(101) # Above lines
         
         self.polygon_data = None
+        self.polygon_id = None
+        self.vertex_idx = None
         
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
@@ -45,6 +54,16 @@ class PolygonVertexItem(QGraphicsEllipseItem):
         window = self.viewer.window()
         if hasattr(window, '_refresh_polygon_list_ui'):
             window._refresh_polygon_list_ui()
+
+    def mousePressEvent(self, event):
+        # Only allow dragging this vertex while it is unlocked for editing
+        # (i.e. Edit mode is active AND this vertex's polygon is the one
+        # currently selected for editing). Otherwise let the click fall
+        # through to the viewer (pan / draw-new-polygon / measurement / etc).
+        if not (self.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable):
+            event.ignore()
+            return
+        super().mousePressEvent(event)
 
 
 class RasterViewer(QGraphicsView):
@@ -543,11 +562,22 @@ class RasterViewer(QGraphicsView):
         super().enterEvent(event)
 
     def mousePressEvent(self, event):
-        # Allow graphics items like PolygonVertexItem to handle clicks first if they are movable
+        # Allow graphics items like PolygonVertexItem to handle clicks first,
+        # but only if they are actually unlocked for dragging right now.
+        # (Finished polygons are locked - movable=False - until the user
+        # explicitly enters Edit mode and picks that polygon, so this no
+        # longer hijacks clicks meant for drawing/panning/measuring.)
         item = self.itemAt(event.pos())
         if hasattr(item, 'flags') and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable):
             super().mousePressEvent(event)
             return
+
+        # Handle "select polygon to edit" clicks while Edit mode is active
+        window = self.window()
+        if event.button() == Qt.MouseButton.LeftButton and getattr(window, 'polygon_edit_mode', False):
+            if hasattr(window, '_select_polygon_for_edit') and window._select_polygon_for_edit(item):
+                event.accept()
+                return
 
         # Handle polygon drawing mode
         if self.polygon_drawing_mode:

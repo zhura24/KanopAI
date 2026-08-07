@@ -14,31 +14,10 @@ from PyQt6.QtCore import Qt
 from ui.widgets.collapsible_box import CollapsibleBox
 
 
-# --- Shared toggle button style ---
-_TOGGLE_ON_STYLE = (
-    "QPushButton {"
-    "  background-color: #16a34a;"
-    "  color: white;"
-    "  font-size: 10px;"
-    "  font-weight: bold;"
-    "  border-radius: 3px;"
-    "  padding: 3px 10px;"
-    "}"
-    "QPushButton:hover { background-color: #15803d; }"
-)
-_TOGGLE_OFF_STYLE = (
-    "QPushButton {"
-    "  background-color: #374151;"
-    "  color: #9ca3af;"
-    "  font-size: 10px;"
-    "  font-weight: bold;"
-    "  border-radius: 3px;"
-    "  padding: 3px 10px;"
-    "}"
-    "QPushButton:hover { background-color: #4b5563; }"
-)
-_SECTION_ENABLED_BORDER = "QFrame { border: 1px solid #16a34a; border-radius: 4px; background: #0d1f14; }"
-_SECTION_DISABLED_BORDER = "QFrame { border: 1px solid #374151; border-radius: 4px; background: #111827; }"
+# --- Shared toggle button style (plain, no color coding - matches the
+#     rest of the app's simple QPushButton look; only checked/unchecked
+#     text differs, same as other checkable toggles like btn_edit_polygon) ---
+_SECTION_FRAME_STYLE = "QFrame { border: 1px solid #555; border-radius: 4px; background-color: #2b2b2b; }"
 
 
 class EHaraPanel(CollapsibleBox):
@@ -101,24 +80,23 @@ class EHaraPanel(CollapsibleBox):
         # NDVI/GNDVI/SR Section (toggleable)
         # ================================================================
         self._ndvi_frame = QFrame()
-        self._ndvi_frame.setStyleSheet(_SECTION_ENABLED_BORDER)
+        self._ndvi_frame.setStyleSheet(_SECTION_FRAME_STYLE)
         ndvi_outer = QVBoxLayout(self._ndvi_frame)
         ndvi_outer.setContentsMargins(6, 6, 6, 6)
         ndvi_outer.setSpacing(6)
 
         # Header row: label + toggle button
         ndvi_header_row = QHBoxLayout()
-        ndvi_title = QLabel("📊 Spectral Indices (NDVI / GNDVI / SR)")
-        ndvi_title.setStyleSheet("QLabel { color: #a3e635; font-weight: bold; font-size: 10px; }")
+        ndvi_title = QLabel("Spectral Indices (NDVI / GNDVI / SR)")
+        ndvi_title.setStyleSheet("QLabel { font-weight: bold; font-size: 10px; }")
         ndvi_header_row.addWidget(ndvi_title)
         ndvi_header_row.addStretch()
 
-        self.btn_toggle_ndvi = QPushButton("✔ Enabled")
+        self.btn_toggle_ndvi = QPushButton("Enabled")
         self.btn_toggle_ndvi.setCheckable(True)
         self.btn_toggle_ndvi.setChecked(True)
         self.btn_toggle_ndvi.setFixedHeight(22)
         self.btn_toggle_ndvi.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_toggle_ndvi.setStyleSheet(_TOGGLE_ON_STYLE)
         self.btn_toggle_ndvi.setToolTip(
             "Toggle ON: NDVI, GNDVI, and SR columns will be computed and\n"
             "included in the Excel output.\n\n"
@@ -172,24 +150,23 @@ class EHaraPanel(CollapsibleBox):
         # Load Training Section (toggleable)
         # ================================================================
         self._training_frame = QFrame()
-        self._training_frame.setStyleSheet(_SECTION_ENABLED_BORDER)
+        self._training_frame.setStyleSheet(_SECTION_FRAME_STYLE)
         training_outer = QVBoxLayout(self._training_frame)
         training_outer.setContentsMargins(6, 6, 6, 6)
         training_outer.setSpacing(6)
 
         # Header row: label + toggle button
         training_header_row = QHBoxLayout()
-        training_title = QLabel("🌿 Nutrient Prediction (N/P/K/Mg)")
-        training_title.setStyleSheet("QLabel { color: #38bdf8; font-weight: bold; font-size: 10px; }")
+        training_title = QLabel("Nutrient Prediction (N/P/K/Mg)")
+        training_title.setStyleSheet("QLabel { font-weight: bold; font-size: 10px; }")
         training_header_row.addWidget(training_title)
         training_header_row.addStretch()
 
-        self.btn_toggle_training = QPushButton("✔ Enabled")
+        self.btn_toggle_training = QPushButton("Enabled")
         self.btn_toggle_training.setCheckable(True)
         self.btn_toggle_training.setChecked(True)
         self.btn_toggle_training.setFixedHeight(22)
         self.btn_toggle_training.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_toggle_training.setStyleSheet(_TOGGLE_ON_STYLE)
         self.btn_toggle_training.setToolTip(
             "Toggle ON: load a training Excel dataset (N/P/K/Mg ground truth) to\n"
             "fit a PCA + Linear Regression model and predict nutrient content.\n\n"
@@ -267,30 +244,14 @@ class EHaraPanel(CollapsibleBox):
     def _toggle_ndvi_section(self):
         """Enable or disable the NDVI/GNDVI/SR computation section."""
         self._ndvi_enabled = self.btn_toggle_ndvi.isChecked()
-        if self._ndvi_enabled:
-            self.btn_toggle_ndvi.setText("✔ Enabled")
-            self.btn_toggle_ndvi.setStyleSheet(_TOGGLE_ON_STYLE)
-            self._ndvi_frame.setStyleSheet(_SECTION_ENABLED_BORDER)
-            self._ndvi_body.setVisible(True)
-        else:
-            self.btn_toggle_ndvi.setText("✘ Disabled")
-            self.btn_toggle_ndvi.setStyleSheet(_TOGGLE_OFF_STYLE)
-            self._ndvi_frame.setStyleSheet(_SECTION_DISABLED_BORDER)
-            self._ndvi_body.setVisible(False)
+        self.btn_toggle_ndvi.setText("Enabled" if self._ndvi_enabled else "Disabled")
+        self._ndvi_body.setVisible(self._ndvi_enabled)
 
     def _toggle_training_section(self):
         """Enable or disable the Load Training / nutrient prediction section."""
         self._training_enabled = self.btn_toggle_training.isChecked()
-        if self._training_enabled:
-            self.btn_toggle_training.setText("✔ Enabled")
-            self.btn_toggle_training.setStyleSheet(_TOGGLE_ON_STYLE)
-            self._training_frame.setStyleSheet(_SECTION_ENABLED_BORDER)
-            self._training_body.setVisible(True)
-        else:
-            self.btn_toggle_training.setText("✘ Disabled")
-            self.btn_toggle_training.setStyleSheet(_TOGGLE_OFF_STYLE)
-            self._training_frame.setStyleSheet(_SECTION_DISABLED_BORDER)
-            self._training_body.setVisible(False)
+        self.btn_toggle_training.setText("Enabled" if self._training_enabled else "Disabled")
+        self._training_body.setVisible(self._training_enabled)
 
     # ------------------------------------------------------------------
     # Training data helpers

@@ -39,6 +39,16 @@ class PolygonPanel(CollapsibleBox):
         btn_row1.addWidget(self.btn_finish_polygon)
         polygon_layout.addLayout(btn_row1)
 
+        # Button row for Edit mode (click a polygon, then drag its vertices)
+        btn_row_edit = QHBoxLayout()
+        self.btn_edit_polygon = QPushButton("Edit")
+        self.btn_edit_polygon.setCheckable(True)
+        self.btn_edit_polygon.setEnabled(False)
+        self.btn_edit_polygon.setToolTip("Click a polygon on the map to drag its vertices")
+        self.btn_edit_polygon.clicked.connect(self.main_window.polygon_handler.toggle_edit_polygon_mode)
+        btn_row_edit.addWidget(self.btn_edit_polygon)
+        polygon_layout.addLayout(btn_row_edit)
+
         # Button row 2: Clear / Save
         btn_row2 = QHBoxLayout()
         self.btn_clear_polygon = QPushButton("Clear All")
@@ -205,6 +215,15 @@ class PolygonPanel(CollapsibleBox):
         self.btn_draw_polygon.setEnabled(not is_drawing)
         self.btn_cancel_polygon.setEnabled(is_drawing)
         self.btn_finish_polygon.setEnabled(is_drawing)
+        # Can't enter Edit mode while actively drawing a new polygon
+        self.btn_edit_polygon.setEnabled(
+            not is_drawing and bool(getattr(self.main_window, 'drawn_polygons', []))
+        )
+
+    def set_edit_button_state(self, is_editing):
+        """Reflect Edit mode on/off on the toggle button (no color/emoji - stays consistent with the rest of the app)."""
+        self.btn_edit_polygon.setChecked(is_editing)
+        self.btn_edit_polygon.setText("Editing... (click again to stop)" if is_editing else "Edit")
 
     def set_action_buttons_enabled(self, enabled):
         self.btn_clear_polygon.setEnabled(enabled)
@@ -212,6 +231,7 @@ class PolygonPanel(CollapsibleBox):
         self.btn_select_all_polygons.setEnabled(enabled)
         self.btn_deselect_all_polygons.setEnabled(enabled)
         self.btn_delete_selected_polygons.setEnabled(enabled and hasattr(self.main_window, 'selected_polygon_ids') and len(self.main_window.selected_polygon_ids) > 0)
+        self.btn_edit_polygon.setEnabled(enabled and not self.main_window.polygon_drawing_mode)
 
     def refresh_polygon_list(self, polygons, selected_ids):
         """Refresh daftar poligon dengan penyesuaian tinggi dinamis."""

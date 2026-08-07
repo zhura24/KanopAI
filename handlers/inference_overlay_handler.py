@@ -761,8 +761,8 @@ class InferenceOverlayHandler(QObject):
         # Only write it when the undo stack shows an actual correction action
         # happened (eliminate/add/edit), regardless of whether it was later
         # undone back to a state with boxes still remaining.
-        user_made_corrections = bool(self.undo_stack.history)
-        if corr_boxes and user_made_corrections:
+        corrected_was_generated = bool(corr_boxes and user_made_corrections)
+        if corrected_was_generated:
             save_corrected_shapefile(
                 raster_path=p_raster,
                 boxes=np.array(corr_boxes, dtype=np.float32),
@@ -790,11 +790,20 @@ class InferenceOverlayHandler(QObject):
         )
         geojson_path = self._export_inference_centroid_geojson(p_raster, out_dir, output_stem, active_box_records)
 
-        summary = [f"1. Raw: {raw_shp.name}", f"2. Corrected: {corrected_shp.name}"]
+        # BUGFIX: this list used to hardcode "2. Corrected: ..." regardless
+        # of whether save_corrected_shapefile() above actually ran, so the
+        # success dialog kept advertising a _corrected_detection.shp file
+        # even on exports with no manual corrections (where it's correctly
+        # skipped on disk). Only list files that were genuinely written, and
+        # number them sequentially so there's no gap.
+        summary = [f"Raw: {raw_shp.name}"]
+        if corrected_was_generated:
+            summary.append(f"Corrected: {corrected_shp.name}")
         if excel_path is not None:
-            summary.append(f"3. Excel: {excel_path.name}")
+            summary.append(f"Excel: {excel_path.name}")
         if geojson_path is not None:
-            summary.append(f"4. GeoJSON: {geojson_path.name}")
+            summary.append(f"GeoJSON: {geojson_path.name}")
+        summary = [f"{i}. {line}" for i, line in enumerate(summary, start=1)]
         QMessageBox.information(
             mw, "Export Successful",
             "Successfully exported inference outputs!\n\n" +

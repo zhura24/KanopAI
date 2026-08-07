@@ -28,6 +28,13 @@ class PolygonHandler:
             )
             return
 
+        if getattr(self.main_window, 'polygon_edit_mode', False):
+            QMessageBox.information(
+                self.main_window, "Exit Edit Mode First",
+                "Turn off Edit mode before drawing a new polygon."
+            )
+            return
+
         if self.main_window.polygon_drawing_mode:
             # Cancel drawing mode
             self.main_window.polygon_drawing_mode = False
@@ -72,9 +79,63 @@ class PolygonHandler:
             self.logger.info("Polygon drawing mode started")
 
     
+    def toggle_edit_polygon_mode(self):
+        """Toggle Edit mode on/off.
+
+        While Edit mode is ON, clicking a polygon on the canvas unlocks its
+        vertices for dragging (see PolygonMixin._select_polygon_for_edit).
+        Turning Edit mode OFF re-locks whichever polygon was being edited so
+        it can't be dragged by accident afterwards.
+        """
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QMessageBox
+
+        main_window = self.main_window
+
+        if not main_window.drawn_polygons:
+            QMessageBox.information(
+                main_window, "No Polygons", "Draw a polygon first before editing."
+            )
+            return
+
+        # Edit mode and draw mode are mutually exclusive
+        if main_window.polygon_drawing_mode:
+            QMessageBox.information(
+                main_window, "Finish Drawing First",
+                "Finish or cancel the polygon you're currently drawing before editing."
+            )
+            return
+
+        main_window.polygon_edit_mode = not main_window.polygon_edit_mode
+
+        if main_window.polygon_edit_mode:
+            main_window.viewer.setCursor(Qt.CursorShape.PointingHandCursor)
+            if hasattr(main_window, 'polygon_panel'):
+                main_window.polygon_panel.set_edit_button_state(True)
+                main_window.polygon_panel.update_status(
+                    "Status: Edit mode - click a polygon to drag its vertices"
+                )
+            self.logger.info("Polygon edit mode ENABLED")
+        else:
+            # Lock whichever polygon was being edited
+            if main_window.editing_polygon_id is not None and hasattr(main_window, '_set_polygon_vertices_movable'):
+                polygon = next(
+                    (p for p in main_window.drawn_polygons if p['id'] == main_window.editing_polygon_id),
+                    None,
+                )
+                main_window._set_polygon_vertices_movable(polygon, False)
+            main_window.editing_polygon_id = None
+            main_window.viewer.setCursor(Qt.CursorShape.ArrowCursor)
+            if hasattr(main_window, 'polygon_panel'):
+                main_window.polygon_panel.set_edit_button_state(False)
+                main_window.polygon_panel.update_status(
+                    f"Status: {len(main_window.drawn_polygons)} polygon(s) drawn"
+                )
+            self.logger.info("Polygon edit mode DISABLED")
+
     def finish_polygon_drawing(self):
         """Finalize the current polygon and persist it on the active layer."""
-        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QMessageBox, QGraphicsItem
         from PyQt6.QtCore import Qt
         from PyQt6.QtGui import QColor, QBrush, QPen, QPolygonF
 
@@ -162,13 +223,18 @@ class PolygonHandler:
         if hasattr(self.main_window, 'updateAreaLabel'):
             self.main_window.updateAreaLabel(polygon)
 
-        # Inject polygon data into vertex items for editability
+        # Inject polygon data into vertex items for editability, and lock
+        # them so a finished polygon can no longer be dragged by accident
+        # (e.g. while drawing a new polygon, panning, or measuring).
+        # Vertices are only unlocked again via Edit mode - see
+        # PolygonMixin._select_polygon_for_edit.
         for i, v_item in enumerate(items['vertex_items']):
             if hasattr(v_item, 'polygon_data'):
                 v_item.polygon_data = polygon
             if v_item:
                 v_item.polygon_id = polygon_id
                 v_item.vertex_idx = i
+                v_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
 
         # Detach temporary viewer state without removing the persisted scene items.
         viewer.polygon_vertices = []
@@ -222,6 +288,8 @@ class PolygonHandler:
 
         self.main_window.drawn_polygons.clear()
         self.main_window.selected_polygon_ids.clear()
+        self.main_window.editing_polygon_id = None
+        self.main_window.polygon_edit_mode = False
 
         viewer = getattr(self.main_window, 'viewer', None)
         if viewer:
@@ -233,6 +301,7 @@ class PolygonHandler:
 
         if hasattr(self.main_window, 'polygon_panel'):
             self.main_window.polygon_panel.set_drawing_buttons_state(False)
+            self.main_window.polygon_panel.set_edit_button_state(False)
             self.main_window.polygon_panel.update_status("Status: No polygon")
             self.main_window.polygon_panel.set_action_buttons_enabled(False)
 

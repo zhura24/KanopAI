@@ -343,6 +343,9 @@ class MainWindow(
         self.polygon_counter = 0  # Counter for generating unique polygon IDs
         self.selected_polygon_ids = set()  # Set of polygon IDs selected for inference
 
+        self.polygon_edit_mode = False  # Whether "Edit" mode is active (click a polygon to edit its vertices)
+        self.editing_polygon_id = None  # ID of the polygon whose vertices are currently draggable
+
         self.polygon_colors = [
             QColor(255, 0, 0),    # Red
             QColor(0, 255, 0),    # Green

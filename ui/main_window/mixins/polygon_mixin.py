@@ -156,6 +156,8 @@ class PolygonMixin:
         # Remove from lists
         self.drawn_polygons.remove(polygon)
         self.selected_polygon_ids.discard(polygon_id)
+        if self.editing_polygon_id == polygon_id:
+            self.editing_polygon_id = None
         
         # Update UI
         self._refresh_polygon_list_ui()
@@ -221,6 +223,8 @@ class PolygonMixin:
             
             # Remove from list
             self.drawn_polygons.remove(polygon)
+            if self.editing_polygon_id == polygon['id']:
+                self.editing_polygon_id = None
         
         # Clear selection
         self.selected_polygon_ids.clear()
@@ -349,6 +353,56 @@ class PolygonMixin:
             filled_item.setPolygon(QPolygonF(points))
 
         self.updateAreaLabel(polygon)
+        return True
+
+    def _find_polygon_by_item(self, item):
+        """Find which drawn polygon owns a given graphics item (vertex, edge,
+        closing line, or filled shape)."""
+        if item is None:
+            return None
+        for polygon in self.drawn_polygons:
+            items = polygon.get('items', {})
+            if item is items.get('filled_item') or item is items.get('closing_line'):
+                return polygon
+            if item in items.get('vertex_items', []) or item in items.get('line_items', []):
+                return polygon
+        return None
+
+    def _set_polygon_vertices_movable(self, polygon, movable):
+        """Lock/unlock a polygon's vertices for dragging."""
+        from PyQt6.QtWidgets import QGraphicsItem
+        if not polygon:
+            return
+        for v_item in polygon.get('items', {}).get('vertex_items', []):
+            if v_item:
+                v_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, movable)
+
+    def _select_polygon_for_edit(self, clicked_item):
+        """Called while Edit mode is active and the user clicks somewhere on
+        the canvas. If the click landed on a drawn polygon, make that
+        polygon's vertices draggable (and lock any previously-active one).
+
+        Returns True if the click was consumed (i.e. it was on a polygon).
+        """
+        polygon = self._find_polygon_by_item(clicked_item)
+        if polygon is None:
+            return False
+
+        # Lock the previously-editing polygon before switching
+        if self.editing_polygon_id is not None and self.editing_polygon_id != polygon['id']:
+            previous = next(
+                (p for p in self.drawn_polygons if p['id'] == self.editing_polygon_id), None
+            )
+            self._set_polygon_vertices_movable(previous, False)
+
+        self._set_polygon_vertices_movable(polygon, True)
+        self.editing_polygon_id = polygon['id']
+
+        if hasattr(self, 'polygon_panel'):
+            self.polygon_panel.update_status(
+                f"Status: Editing {polygon['name']} - drag the vertices to reshape it"
+            )
+        self.logger.info(f"Polygon {polygon['id']} selected for vertex editing")
         return True
 
     def deletePolygon(self, polygon_id):
